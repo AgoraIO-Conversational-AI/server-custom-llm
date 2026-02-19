@@ -16,7 +16,7 @@ const openai = new OpenAI({
 
 // Initialize Express app
 const app = express();
-const port = process.env.PORT || 8000;
+const port = process.env.PORT || 8101;
 
 // Configure logging
 const logger = {

@@ -472,5 +472,5 @@ func main() {
 	server.setupRoutes(r)
 
 	// Start server
-	r.Run(":8000")
+	r.Run(":8102")
 }

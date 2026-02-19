@@ -1,6 +1,6 @@
 # Custom LLM Server — Node.js
 
-Node.js implementation using Express.
+Node.js implementation using Express. Default port: **8101**.
 
 ## Quick Start
 
@@ -16,19 +16,7 @@ npm install
 
 ### Configuration
 
-Copy the env example and set your OpenAI API key:
-
-```bash
-cp env.example .env
-```
-
-Edit `.env`:
-
-```
-OPENAI_API_KEY=sk-...
-```
-
-Or set it directly:
+Set your OpenAI API key:
 
 ```bash
 export OPENAI_API_KEY=sk-...
@@ -46,14 +34,20 @@ For development with auto-restart:
 npm run dev
 ```
 
-The server starts on `http://localhost:8000`.
+The server starts on `http://localhost:8101`.
 
 ### Test
 
 ```bash
-curl -X POST http://localhost:8000/chat/completions \
+curl -X POST http://localhost:8101/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"messages": [{"role": "user", "content": "Hello, how are you?"}], "stream": true, "model": "gpt-4o-mini"}'
+```
+
+Run the automated tests:
+
+```bash
+bash ../test/test_node.sh
 ```
 
 ## Architecture
@@ -105,7 +99,7 @@ simulated audio if files are not found.
 ## Expose to the Internet
 
 ```bash
-cloudflared tunnel --url http://localhost:8000
+cloudflared tunnel --url http://localhost:8101
 ```
 
 ## License
