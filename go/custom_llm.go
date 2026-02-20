@@ -393,6 +393,7 @@ func (s *Server) handleChatCompletion(c *gin.Context) {
 
 	if !request.Stream {
 		// ── Non-streaming with multi-pass tool execution ──
+		var lastResponse openai.ChatCompletionResponse
 		for pass := 0; pass < 5; pass++ {
 			req := openai.ChatCompletionRequest{
 				Model:    model,
@@ -407,6 +408,7 @@ func (s *Server) handleChatCompletion(c *gin.Context) {
 				s.sendError(c, http.StatusInternalServerError, err)
 				return
 			}
+			lastResponse = response
 
 			choice := response.Choices[0]
 
@@ -454,7 +456,9 @@ func (s *Server) handleChatCompletion(c *gin.Context) {
 			}
 		}
 
-		s.sendError(c, http.StatusInternalServerError, fmt.Errorf("max tool execution passes reached"))
+		// Max passes reached — return the last LLM response instead of an error
+		s.logger.Warn("Max tool execution passes reached, returning last response")
+		c.JSON(http.StatusOK, lastResponse)
 		return
 	}
 
@@ -747,6 +751,9 @@ func (s *Server) sendError(c *gin.Context, status int, err error) {
 }
 
 func (s *Server) setupRoutes(r *gin.Engine) {
+	r.GET("/ping", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
 	r.POST("/audio/chat/completions", s.handleAudioChatCompletion)
 	r.POST("/chat/completions", s.handleChatCompletion)
 	r.POST("/rag/chat/completions", s.handleRAGChatCompletion)
