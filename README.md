@@ -1,32 +1,8 @@
 # <img src="./assets/agora-logo.svg" alt="Agora" width="24" height="24" style="vertical-align: middle; margin-right: 8px;" /> Custom LLM Server
 
-OpenAI-compatible LLM proxy for Agora Conversational AI with streaming, tool execution, conversation memory, and RAG.
+OpenAI-compatible LLM proxy for [Agora Conversational AI](https://docs.agora.io/en/conversational-ai/overview). Sits between the Agora ConvoAI Engine and your LLM provider, giving you full control over the request/response pipeline — tool execution, conversation memory, RAG context injection, and message transformation.
 
-- [Overview](#overview)
-- [Features](#features)
-- [Quick Start](#quick-start)
-- [Architecture](#architecture)
-- [Endpoints](#endpoints)
-- [Environment Variables](#environment-variables)
-- [Tool Execution](#tool-execution)
-- [Conversation Memory](#conversation-memory)
-- [RTM Integration](#rtm-integration)
-- [Ports](#ports)
-- [Expose Locally](#expose-locally)
-- [Testing](#testing)
-- [Integration](#integration)
-- [Resources](#resources)
-- [License](#license)
-
-## Overview
-
-The Custom LLM Server sits between the Agora Conversational AI Engine and your
-LLM provider, giving you full control over the request/response pipeline. Use it
-to execute tools server-side, maintain conversation history, inject RAG context,
-transform messages, or route to different models.
-
-All implementations provide the same OpenAI-compatible endpoints so you can drop
-in any language and get the same behavior.
+Implementations in Python, Node.js, and Go — all provide the same OpenAI-compatible endpoints.
 
 ## Features
 
@@ -38,76 +14,62 @@ in any language and get the same behavior.
 | Conversation memory (per-channel) | Yes | Yes | Yes |
 | RAG retrieval (keyword-based) | Yes | Yes | Yes |
 | Multimodal audio responses | Yes | Yes | Yes |
+| Health check endpoint | `/docs` | `/ping` | `/ping` |
 | RTM text messaging | -- | Yes | -- |
 
 ## Quick Start
 
-| Language | Framework | Guide |
-|----------|-----------|-------|
-| Python | FastAPI + uvicorn | [python/](./python/) |
-| Node.js | Express | [node/](./node/) |
-| Go | Gin | [go/](./go/) |
+| Language | Framework | Port | Guide |
+|----------|-----------|------|-------|
+| Python | FastAPI + uvicorn | 8100 | [python/](./python/) |
+| Node.js | Express | 8101 | [node/](./node/) |
+| Go | Gin | 8102 | [go/](./go/) |
 
-## Architecture
+## How It Works
 
-```mermaid
-flowchart LR
-    Engine[Agora ConvoAI Engine]-->|POST /chat/completions|Server
-
-    subgraph Server[Custom LLM Server]
-        Basic["chat/completions"]
-        RAG["rag/chat/completions"]
-        Audio["audio/chat/completions"]
-        ToolExec["Tool Execution Loop"]
-        ConvStore["Conversation Store"]
-    end
-
-    Server-->|SSE Response|Engine
-
-    Server-->|API call|LLM[LLM Provider]
-    LLM-->|Stream Response|Server
-    LLM-->|tool_calls|ToolExec
-    ToolExec-->|results|LLM
-
-    Basic-->|save/load|ConvStore
-    RAG-->|save/load|ConvStore
-
-    subgraph Knowledge
-        KB[Knowledge Base]
-    end
-
-    RAG-.->|Retrieval|KB
-```
-
-### Tool Execution Flow
+The Agora ConvoAI Engine calls your Custom LLM Server instead of calling the LLM provider directly. Your server processes the request — adding conversation history, executing tools, injecting RAG context — then forwards to the LLM and streams the response back.
 
 ```mermaid
 sequenceDiagram
-    participant Client
-    participant Server
-    participant LLM
-    participant Tool
+    participant Engine as Agora ConvoAI Engine
+    participant Server as Custom LLM Server
+    participant LLM as LLM Provider (OpenAI, etc.)
 
-    Client->>Server: POST /chat/completions
-    Server->>LLM: messages + tools
-    LLM-->>Server: tool_calls (get_weather)
-    Server->>Tool: execute get_weather("Tokyo")
-    Tool-->>Server: "72°F, partly cloudy"
-    Server->>LLM: messages + tool result
-    LLM-->>Server: final text response
-    Server-->>Client: SSE stream
+    Engine->>Server: POST /chat/completions (messages + tools)
+    Server->>Server: Load conversation history
+    Server->>LLM: Forward messages + tool definitions
+    LLM-->>Server: tool_calls (e.g. get_weather)
+    Server->>Server: Execute tools locally
+    Server->>LLM: Messages + tool results
+    LLM-->>Server: Final text response (SSE stream)
+    Server->>Server: Save to conversation memory
+    Server-->>Engine: SSE stream
+```
+
+For RAG requests, the server retrieves relevant knowledge and injects it before calling the LLM:
+
+```mermaid
+sequenceDiagram
+    participant Engine as Agora ConvoAI Engine
+    participant Server as Custom LLM Server
+    participant KB as Knowledge Base
+    participant LLM as LLM Provider
+
+    Engine->>Server: POST /rag/chat/completions
+    Server-->>Engine: "Let me think about that..." (SSE)
+    Server->>KB: Retrieve relevant context
+    Server->>LLM: Augmented messages + context
+    LLM-->>Server: Response (SSE stream)
+    Server-->>Engine: SSE stream
 ```
 
 ## Endpoints
 
 ### `/chat/completions` — LLM Proxy with Tool Execution
 
-Receives an OpenAI-compatible chat completion request, forwards it to the LLM
-provider, and relays the response back. Supports both streaming and
-non-streaming modes.
+Receives an OpenAI-compatible chat completion request, forwards it to the LLM provider, and relays the response back. Supports both streaming and non-streaming modes.
 
-When the LLM returns `tool_calls`, the server executes them locally and sends
-the results back for a follow-up response. This loop runs up to 5 passes.
+When the LLM returns `tool_calls`, the server executes them locally and sends the results back for a follow-up response. This loop runs up to 5 passes.
 
 ### `/rag/chat/completions` — RAG-Enhanced
 
@@ -120,8 +82,7 @@ Same as the basic endpoint but with a retrieval step before the LLM call:
 
 ### `/audio/chat/completions` — Multimodal Audio
 
-Returns audio responses with transcript. Reads a text file for the transcript
-and a PCM file for the audio data, then streams them as SSE chunks.
+Returns audio responses with transcript. Reads a text file for the transcript and a PCM file for the audio data, then streams them as SSE chunks.
 
 ## Environment Variables
 
@@ -178,10 +139,10 @@ Engine sends these values in the request `context` field:
 Conversation memory is on by default. Conversations are trimmed at 100 messages
 (keeping 75 most recent) and cleaned up after 24 hours of inactivity.
 
-## RTM Integration
+## RTM Integration (Node.js Only)
 
 The Node.js server optionally connects to Agora RTM for text-based messaging
-alongside voice/video interactions. Set the `AGORA_*` env vars and install
+alongside voice interactions. Set the `AGORA_*` env vars and install
 `rtm-nodejs`:
 
 ```bash
@@ -196,18 +157,11 @@ Python and Go do not include RTM because the native Agora RTM SDKs require
 CGO/native library compilation, which adds complexity beyond what's appropriate
 for sample code.
 
-## Ports
-
-| Language | Default Port |
-|----------|-------------|
-| Python | 8100 |
-| Node.js | 8101 |
-| Go | 8102 |
-
 ## Expose Locally
 
-When running locally, you need a tunnel to make the server reachable from Agora
-ConvoAI (which runs in the cloud). Use [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/create-local-tunnel/)
+When running locally, you need a tunnel to make the server reachable from the
+Agora ConvoAI Engine (which runs in the cloud). Use
+[cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/create-local-tunnel/)
 to create a free tunnel — no account required:
 
 ```bash
