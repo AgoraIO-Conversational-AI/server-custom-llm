@@ -19,6 +19,9 @@
     "morgan": "^1.10.0",
     "openai": "^4.20.0"
   },
+  "optionalDependencies": {
+    "rtm-nodejs": "^2.2.2"
+  },
   "devDependencies": {
     "nodemon": "^3.1.0"
   }

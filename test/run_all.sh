@@ -50,7 +50,7 @@ for lang in "${LANGUAGES[@]}"; do
         python)
             echo "Starting Custom LLM Server (Python) on port 8100..."
             cd "$REPO_DIR/python"
-            YOUR_LLM_API_KEY=test-key python3 custom_llm.py > /dev/null 2>&1 &
+            LLM_API_KEY=test-key python3 custom_llm.py > /dev/null 2>&1 &
             PIDS+=($!)
             if wait_for_port 8100 "Python"; then
                 echo ""
@@ -70,7 +70,7 @@ for lang in "${LANGUAGES[@]}"; do
             if [ ! -d "node_modules" ]; then
                 npm install --silent 2>/dev/null
             fi
-            OPENAI_API_KEY=test-key node custom_llm.js > /dev/null 2>&1 &
+            LLM_API_KEY=test-key node custom_llm.js > /dev/null 2>&1 &
             PIDS+=($!)
             if wait_for_port 8101 "Node.js"; then
                 echo ""
@@ -87,7 +87,7 @@ for lang in "${LANGUAGES[@]}"; do
         go)
             echo "Starting Custom LLM Server (Go) on port 8102..."
             cd "$REPO_DIR/go"
-            YOUR_LLM_API_KEY=test-key go run custom_llm.go > /dev/null 2>&1 &
+            LLM_API_KEY=test-key go run . > /dev/null 2>&1 &
             PIDS+=($!)
             if wait_for_port 8102 "Go"; then
                 echo ""

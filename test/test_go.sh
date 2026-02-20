@@ -1,8 +1,8 @@
 #!/bin/bash
 #
 # Test script for Custom LLM Server (Go / Gin)
-# Tests endpoint availability, error handling, and response format.
-# Does NOT require a real LLM API key — tests server structure only.
+# Tests endpoint availability, SSE format, conversation memory, RAG,
+# and error handling. Does NOT require a real LLM API key.
 #
 # Usage: bash test_go.sh [base_url]
 #   base_url defaults to http://localhost:8102
@@ -48,11 +48,31 @@ assert_status_oneof() {
     FAIL=$((FAIL + 1))
 }
 
+assert_contains() {
+    local test_name="$1"
+    local response="$2"
+    local expected="$3"
+    if echo "$response" | grep -qiF "$expected"; then
+        green "PASS: $test_name"
+        PASS=$((PASS + 1))
+    else
+        red "FAIL: $test_name"
+        echo "  Expected to contain: $expected"
+        echo "  Got: $(echo "$response" | head -5)"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
 # Curl wrapper that tolerates timeout (exit 28) for SSE streams.
 curl_status() {
     local status
     status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$@") || true
     echo "$status"
+}
+
+# Curl wrapper that returns response body.
+curl_body() {
+    curl -s --max-time 5 "$@" || true
 }
 
 echo "========================================="
@@ -65,36 +85,92 @@ echo ""
 # HAPPY PATH
 # ===========================================
 
-echo "--- Test: /chat/completions accepts POST ---"
+echo "--- Test: /chat/completions streaming accepts POST ---"
 status=$(curl_status -X POST "${BASE_URL}/chat/completions" \
     -H "Content-Type: application/json" \
     -d '{"messages":[{"role":"user","content":"Hello"}],"stream":true,"model":"gpt-4o-mini"}')
-assert_status_oneof "/chat/completions endpoint exists" "$status" "200" "500"
+assert_status_oneof "/chat/completions streaming accepted" "$status" "200" "500"
+echo ""
+
+echo "--- Test: /chat/completions streaming returns SSE content-type ---"
+ct=$(curl -s -o /dev/null -w "%{content_type}" --max-time 5 -X POST "${BASE_URL}/chat/completions" \
+    -H "Content-Type: application/json" \
+    -d '{"messages":[{"role":"user","content":"Hello"}],"stream":true,"model":"gpt-4o-mini"}' || true)
+assert_contains "/chat/completions returns text/event-stream" "$ct" "text/event-stream"
+echo ""
+
+echo "--- Test: /chat/completions non-streaming accepts POST ---"
+status=$(curl_status -X POST "${BASE_URL}/chat/completions" \
+    -H "Content-Type: application/json" \
+    -d '{"messages":[{"role":"user","content":"Hello"}],"stream":false,"model":"gpt-4o-mini"}')
+assert_status_oneof "/chat/completions non-streaming accepted" "$status" "200" "500"
+echo ""
+
+echo "--- Test: /chat/completions with context ---"
+status=$(curl_status -X POST "${BASE_URL}/chat/completions" \
+    -H "Content-Type: application/json" \
+    -d '{"messages":[{"role":"user","content":"Hello"}],"stream":true,"model":"gpt-4o-mini","context":{"appId":"test-app","userId":"test-user","channel":"test-channel"}}')
+assert_status_oneof "/chat/completions with context accepted" "$status" "200" "500"
+echo ""
+
+echo "--- Test: /chat/completions with tools ---"
+status=$(curl_status -X POST "${BASE_URL}/chat/completions" \
+    -H "Content-Type: application/json" \
+    -d '{"messages":[{"role":"user","content":"What is the weather?"}],"stream":true,"model":"gpt-4o-mini","tools":[{"type":"function","function":{"name":"get_weather","description":"Get weather","parameters":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}}}]}')
+assert_status_oneof "/chat/completions with tools accepted" "$status" "200" "500"
 echo ""
 
 echo "--- Test: /rag/chat/completions accepts POST ---"
 status=$(curl_status -X POST "${BASE_URL}/rag/chat/completions" \
     -H "Content-Type: application/json" \
-    -d '{"messages":[{"role":"user","content":"Hello"}],"stream":true,"model":"gpt-4o-mini"}')
-assert_status_oneof "/rag/chat/completions endpoint exists" "$status" "200" "500"
+    -d '{"messages":[{"role":"user","content":"Tell me about Agora ConvoAI"}],"stream":true,"model":"gpt-4o-mini"}')
+assert_status_oneof "/rag/chat/completions accepted" "$status" "200" "500"
+echo ""
+
+echo "--- Test: /rag/chat/completions returns waiting message ---"
+resp=$(curl_body -X POST "${BASE_URL}/rag/chat/completions" \
+    -H "Content-Type: application/json" \
+    -d '{"messages":[{"role":"user","content":"Tell me about Agora ConvoAI"}],"stream":true,"model":"gpt-4o-mini"}')
+assert_contains "RAG response contains waiting_msg" "$resp" "waiting_msg"
+echo ""
+
+echo "--- Test: /rag/chat/completions returns SSE content-type ---"
+ct=$(curl -s -o /dev/null -w "%{content_type}" --max-time 5 -X POST "${BASE_URL}/rag/chat/completions" \
+    -H "Content-Type: application/json" \
+    -d '{"messages":[{"role":"user","content":"Tell me about Agora ConvoAI"}],"stream":true,"model":"gpt-4o-mini"}' || true)
+assert_contains "/rag/chat/completions returns text/event-stream" "$ct" "text/event-stream"
 echo ""
 
 echo "--- Test: /audio/chat/completions accepts POST ---"
 status=$(curl_status -X POST "${BASE_URL}/audio/chat/completions" \
     -H "Content-Type: application/json" \
     -d '{"messages":[{"role":"user","content":"Hello"}],"stream":true,"model":"gpt-4o-mini"}')
-assert_status_oneof "/audio/chat/completions endpoint exists" "$status" "200" "500"
+assert_status_oneof "/audio/chat/completions accepted" "$status" "200" "500"
+echo ""
+
+echo "--- Test: /chat/completions with empty context ---"
+status=$(curl_status -X POST "${BASE_URL}/chat/completions" \
+    -H "Content-Type: application/json" \
+    -d '{"messages":[{"role":"user","content":"Hello"}],"stream":true,"model":"gpt-4o-mini","context":{}}')
+assert_status_oneof "/chat/completions with empty context accepted" "$status" "200" "500"
 echo ""
 
 # ===========================================
 # FAILURE PATH
 # ===========================================
 
-echo "--- Test: stream=false rejected ---"
-status=$(curl_status -X POST "${BASE_URL}/chat/completions" \
+echo "--- Test: RAG stream=false rejected ---"
+status=$(curl_status -X POST "${BASE_URL}/rag/chat/completions" \
     -H "Content-Type: application/json" \
     -d '{"messages":[{"role":"user","content":"Hello"}],"stream":false,"model":"gpt-4o-mini"}')
-assert_status "stream=false returns 400" "$status" "400"
+assert_status "RAG stream=false returns 400" "$status" "400"
+echo ""
+
+echo "--- Test: Audio stream=false rejected ---"
+status=$(curl_status -X POST "${BASE_URL}/audio/chat/completions" \
+    -H "Content-Type: application/json" \
+    -d '{"messages":[{"role":"user","content":"Hello"}],"stream":false,"model":"gpt-4o-mini"}')
+assert_status "Audio stream=false returns 400" "$status" "400"
 echo ""
 
 echo "--- Test: Invalid JSON body ---"

@@ -21,7 +21,7 @@ All servers use dedicated ports so they can run and be tested in parallel.
 
 ```bash
 cd python
-export YOUR_LLM_API_KEY=test-key
+export LLM_API_KEY=test-key
 python3 custom_llm.py &
 SERVER_PID=$!
 bash ../test/test_python.sh
@@ -33,7 +33,7 @@ kill $SERVER_PID
 ```bash
 cd node
 npm install
-OPENAI_API_KEY=test-key npm start &
+LLM_API_KEY=test-key npm start &
 SERVER_PID=$!
 bash ../test/test_node.sh
 kill $SERVER_PID
@@ -43,8 +43,7 @@ kill $SERVER_PID
 
 ```bash
 cd go
-go build -o custom_llm_server custom_llm.go
-YOUR_LLM_API_KEY=test-key ./custom_llm_server &
+LLM_API_KEY=test-key go run . &
 SERVER_PID=$!
 bash ../test/test_go.sh
 kill $SERVER_PID
@@ -60,12 +59,20 @@ bash test/run_all.sh
 
 ### Happy Path
 - Server starts and responds on correct port
-- `/chat/completions` accepts POST with valid body and returns SSE content-type
+- `/chat/completions` accepts POST with streaming and returns SSE content-type
+- `/chat/completions` accepts POST with non-streaming mode
+- `/chat/completions` accepts requests with `context` field (conversation memory)
+- `/chat/completions` accepts requests with empty `context` object
+- `/chat/completions` accepts requests with `tools` field (tool execution)
 - `/rag/chat/completions` accepts POST and returns SSE content-type
+- `/rag/chat/completions` returns a waiting message before LLM response
+- `/audio/chat/completions` accepts POST and returns SSE data
 - Endpoints exist and accept requests
 
 ### Failure Path
 - Missing `messages` field returns 400/422
-- `stream: false` returns 400
+- `stream: false` on RAG endpoint returns 400
+- `stream: false` on audio endpoint returns 400
+- Missing messages on RAG endpoint returns 400
 - Invalid JSON returns error
 - Non-existent endpoint returns 404
