@@ -97,15 +97,6 @@ All three languages use the same env vars with backward-compatible fallbacks:
 Legacy variables `YOUR_LLM_API_KEY` and `OPENAI_API_KEY` are also accepted as
 fallbacks for `LLM_API_KEY`.
 
-**RTM (Node.js only):**
-
-| Variable | Description |
-|----------|-------------|
-| `AGORA_APP_ID` | Agora App ID |
-| `AGORA_RTM_TOKEN` | RTM token (optional for testing) |
-| `AGORA_RTM_USER_ID` | Agent's RTM user ID |
-| `AGORA_RTM_CHANNEL` | RTM channel to subscribe to |
-
 ## Tool Execution
 
 Each language includes two sample tools:
@@ -138,24 +129,6 @@ Engine sends these values in the request `context` field:
 
 Conversation memory is on by default. Conversations are trimmed at 100 messages
 (keeping 75 most recent) and cleaned up after 24 hours of inactivity.
-
-## RTM Integration (Node.js Only)
-
-The Node.js server optionally connects to Agora RTM for text-based messaging
-alongside voice interactions. Set the `AGORA_*` env vars and install
-`rtm-nodejs`:
-
-```bash
-cd node && npm install rtm-nodejs
-```
-
-When enabled, the server subscribes to the configured RTM channel, processes
-incoming text messages through the LLM with full tool execution, and sends
-responses back via RTM.
-
-Python and Go do not include RTM because the native Agora RTM SDKs require
-CGO/native library compilation, which adds complexity beyond what's appropriate
-for sample code.
 
 ## Expose Locally
 
