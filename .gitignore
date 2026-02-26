@@ -3,3 +3,4 @@ package-lock.json
 __pycache__/
 *.pyc
 .env
+go/server-custom-llm
