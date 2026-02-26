@@ -2,13 +2,8 @@
  * RTM (Real-Time Messaging) client for the Custom LLM Server.
  * Node.js only — uses the rtm-nodejs package.
  *
- * Environment variables:
- *   AGORA_APP_ID        - Agora App ID
- *   AGORA_RTM_TOKEN     - RTM token (optional for testing)
- *   AGORA_RTM_USER_ID   - Agent's RTM user ID
- *   AGORA_RTM_CHANNEL   - RTM channel to subscribe to
- *
- * If env vars are not set, RTM initialization is silently skipped.
+ * Can be initialized either from environment variables (legacy) or
+ * dynamically from request params (appId, uid, token, channel).
  */
 
 const logger = {
@@ -19,51 +14,89 @@ const logger = {
 };
 
 let rtmClient = null;
-let channelName = null;
+let defaultChannel = null;
+let subscribedChannels = new Set();
 let messageHandlers = [];
 let reconnectAttempts = 0;
+let lastInitParams = null;
 const MAX_RECONNECT_ATTEMPTS = 10;
-const BASE_RECONNECT_DELAY = 2000; // 2 seconds
-const MAX_RECONNECT_DELAY = 60000; // 60 seconds
+const BASE_RECONNECT_DELAY = 2000;
+const MAX_RECONNECT_DELAY = 60000;
 
 /**
- * Initialize RTM client. Returns the client if successful, null otherwise.
- * Silently skips if environment variables are not configured.
+ * Initialize RTM from environment variables. Returns the client or null.
  */
 async function initRTM() {
   const appId = process.env.AGORA_APP_ID;
   const userId = process.env.AGORA_RTM_USER_ID;
   const token = process.env.AGORA_RTM_TOKEN || '';
-  channelName = process.env.AGORA_RTM_CHANNEL;
+  const channel = process.env.AGORA_RTM_CHANNEL;
 
-  if (!appId || !userId || !channelName) {
+  if (!appId || !userId || !channel) {
     logger.debug(
       'RTM env vars not set (AGORA_APP_ID, AGORA_RTM_USER_ID, AGORA_RTM_CHANNEL) — skipping RTM'
     );
     return null;
   }
 
+  return _initWithParams(appId, userId, token, channel);
+}
+
+/**
+ * Initialize RTM from explicit parameters (e.g. from ConvoAI request).
+ * Idempotent — if already connected, subscribes to the new channel.
+ */
+async function initRTMWithParams(appId, uid, token, channel) {
+  if (!appId || !uid) {
+    logger.debug('Missing appId or uid for RTM init');
+    return null;
+  }
+
+  // Already connected — just subscribe to the channel if new
+  if (rtmClient && channel && !subscribedChannels.has(channel)) {
+    try {
+      await rtmClient.subscribe(channel);
+      subscribedChannels.add(channel);
+      logger.info(`Subscribed to additional channel: ${channel}`);
+    } catch (e) {
+      logger.error(`Failed to subscribe to channel ${channel}:`, e);
+    }
+    return rtmClient;
+  }
+
+  if (rtmClient) {
+    return rtmClient; // Already connected and channel already subscribed
+  }
+
+  return _initWithParams(appId, uid, token, channel);
+}
+
+async function _initWithParams(appId, userId, token, channel) {
+  lastInitParams = { appId, userId, token, channel };
+
   try {
     const AgoraRTM = require('rtm-nodejs');
 
     rtmClient = new AgoraRTM.RTM(appId, userId);
 
-    // Login
     const loginOptions = token ? { token } : {};
     await rtmClient.login(loginOptions);
     logger.info(`Logged in as ${userId}`);
 
-    // Subscribe to channel
-    await rtmClient.subscribe(channelName);
-    logger.info(`Subscribed to channel: ${channelName}`);
+    if (channel) {
+      await rtmClient.subscribe(channel);
+      subscribedChannels.add(channel);
+      defaultChannel = channel;
+      logger.info(`Subscribed to channel: ${channel}`);
+    }
 
-    // Set up event listeners
     setupEventListeners(appId, userId);
 
     reconnectAttempts = 0;
     return rtmClient;
   } catch (error) {
     logger.error('Failed to initialize RTM:', error);
+    rtmClient = null;
     return null;
   }
 }
@@ -89,7 +122,7 @@ function setupEventListeners(appId, userId) {
     logger.info(`Status: ${event.state}`);
 
     if (event.state === 'DISCONNECTED' || event.state === 'FAILED') {
-      scheduleReconnection(appId, userId);
+      scheduleReconnection();
     } else if (event.state === 'CONNECTED') {
       reconnectAttempts = 0;
     }
@@ -100,7 +133,7 @@ function setupEventListeners(appId, userId) {
   });
 }
 
-function scheduleReconnection(appId, userId) {
+function scheduleReconnection() {
   reconnectAttempts++;
 
   if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
@@ -119,23 +152,30 @@ function scheduleReconnection(appId, userId) {
 
   setTimeout(async () => {
     try {
-      // Try to logout existing client
       try {
         if (rtmClient) await rtmClient.logout();
       } catch (e) {
         // ignore
       }
+      rtmClient = null;
+      subscribedChannels.clear();
 
-      // Reinitialize
-      const result = await initRTM();
-      if (result) {
-        logger.info('Reconnected successfully');
-      } else {
-        scheduleReconnection(appId, userId);
+      if (lastInitParams) {
+        const result = await _initWithParams(
+          lastInitParams.appId,
+          lastInitParams.userId,
+          lastInitParams.token,
+          lastInitParams.channel
+        );
+        if (result) {
+          logger.info('Reconnected successfully');
+        } else {
+          scheduleReconnection();
+        }
       }
     } catch (error) {
       logger.error('Reconnection failed:', error);
-      scheduleReconnection(appId, userId);
+      scheduleReconnection();
     }
   }, delay);
 }
@@ -149,14 +189,38 @@ async function sendRTMMessage(channel, message) {
     return false;
   }
 
+  const targetChannel = channel || defaultChannel;
+  if (!targetChannel) {
+    logger.warn('No channel specified for RTM message');
+    return false;
+  }
+
+  // Auto-subscribe if not yet subscribed
+  if (!subscribedChannels.has(targetChannel)) {
+    try {
+      await rtmClient.subscribe(targetChannel);
+      subscribedChannels.add(targetChannel);
+      logger.info(`Auto-subscribed to channel: ${targetChannel}`);
+    } catch (e) {
+      logger.error(`Failed to subscribe to ${targetChannel}:`, e);
+    }
+  }
+
   try {
-    await rtmClient.publish(channel || channelName, message);
-    logger.debug(`Message sent to ${channel || channelName}`);
+    await rtmClient.publish(targetChannel, message);
+    logger.debug(`Message sent to ${targetChannel}`);
     return true;
   } catch (error) {
     logger.error('Failed to send RTM message:', error);
     return false;
   }
+}
+
+/**
+ * Check if RTM is connected.
+ */
+function isConnected() {
+  return rtmClient !== null;
 }
 
 /**
@@ -168,6 +232,8 @@ function onRTMMessage(callback) {
 
 module.exports = {
   initRTM,
+  initRTMWithParams,
   sendRTMMessage,
   onRTMMessage,
+  isConnected,
 };

@@ -16,24 +16,51 @@ const {
   saveMessage,
   getMessages,
 } = require('./conversation_store');
+const { AudioSubscriber } = require('./audio_subscriber');
 
 // Load environment variables
 dotenv.config();
 
-// Env var standardization with backward-compatible fallbacks
-const LLM_API_KEY =
+// Env var fallback defaults (used when request doesn't provide credentials)
+const DEFAULT_LLM_API_KEY =
   process.env.LLM_API_KEY ||
   process.env.YOUR_LLM_API_KEY ||
   process.env.OPENAI_API_KEY ||
   '';
-const LLM_BASE_URL = process.env.LLM_BASE_URL || 'https://api.openai.com/v1';
-const LLM_MODEL = process.env.LLM_MODEL || 'gpt-4o-mini';
+const DEFAULT_LLM_BASE_URL = process.env.LLM_BASE_URL || 'https://api.openai.com/v1';
+const DEFAULT_LLM_MODEL = process.env.LLM_MODEL || 'gpt-4o-mini';
 
-// Initialize OpenAI client
+/**
+ * Get an OpenAI client for this request.
+ * Uses API key from request headers if provided, otherwise falls back to env.
+ */
+function getOpenAIClient(req) {
+  const authHeader = req.headers['authorization'] || '';
+  const bearerKey = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+  const apiKey = bearerKey || DEFAULT_LLM_API_KEY;
+  return new OpenAI({
+    apiKey,
+    baseURL: DEFAULT_LLM_BASE_URL,
+  });
+}
+
+// Default client for RTM and other non-request contexts
 const openai = new OpenAI({
-  apiKey: LLM_API_KEY,
-  baseURL: LLM_BASE_URL,
+  apiKey: DEFAULT_LLM_API_KEY,
+  baseURL: DEFAULT_LLM_BASE_URL,
 });
+
+// ─── Module registration ───
+
+const THYMIA_ENABLED = process.env.THYMIA_ENABLED === 'true';
+const modules = [];
+const audioSubscriber = new AudioSubscriber();
+
+if (THYMIA_ENABLED) {
+  const thymiaModule = require('./integrations/thymia');
+  thymiaModule.init(audioSubscriber, { rtmClient: () => rtmClient });
+  modules.push(thymiaModule);
+}
 
 // Initialize Express app
 const app = express();
@@ -56,6 +83,29 @@ app.get('/ping', (req, res) => {
   res.json({ message: 'pong' });
 });
 
+// ─── Agent Registry (appId:channel → agentId + auth) ───
+const agentRegistry = new Map();
+
+function registerAgent(appId, channel, agentId, authHeader, agentEndpoint) {
+  const key = `${appId}:${channel}`;
+  agentRegistry.set(key, { agentId, authHeader, agentEndpoint, registeredAt: Date.now() });
+  logger.info(`[AgentRegistry] registered ${key} → agent=${agentId}`);
+}
+
+function unregisterAgent(appId, channel) {
+  const key = `${appId}:${channel}`;
+  const entry = agentRegistry.get(key);
+  if (entry) {
+    agentRegistry.delete(key);
+    logger.info(`[AgentRegistry] unregistered ${key} (agent=${entry.agentId})`);
+  }
+  return entry;
+}
+
+function getAgent(appId, channel) {
+  return agentRegistry.get(`${appId}:${channel}`) || null;
+}
+
 // Root endpoint
 app.get('/', (req, res) => {
   res.json({
@@ -64,25 +114,106 @@ app.get('/', (req, res) => {
       '/chat/completions',
       '/rag/chat/completions',
       '/audio/chat/completions',
+      '/register-agent',
+      '/unregister-agent',
     ],
   });
+});
+
+// ─── Agent Registration Endpoint ───
+// Called by simple-backend after successful join to map appId+channel → agentId
+app.post('/register-agent', (req, res) => {
+  const { app_id, channel, agent_id, auth_header, agent_endpoint, prompt } = req.body;
+  if (!app_id || !channel || !agent_id) {
+    logger.error('[RegisterAgent] missing required fields: app_id, channel, agent_id');
+    return res.status(400).json({ error: 'Missing app_id, channel, or agent_id' });
+  }
+  registerAgent(app_id, channel, agent_id, auth_header, agent_endpoint);
+  logger.info(`[RegisterAgent] prompt_len=${(prompt || '').length}`);
+  // Notify modules about the agent registration (include prompt)
+  for (const mod of modules) {
+    if (mod.onAgentRegistered) {
+      mod.onAgentRegistered(app_id, channel, agent_id, auth_header, agent_endpoint, prompt);
+    }
+  }
+  res.json({ success: true, key: `${app_id}:${channel}`, agent_id });
+});
+
+// ─── Agent Unregistration Endpoint ───
+// Called by simple-backend on hangup to clean up audio subscriber + modules
+app.post('/unregister-agent', (req, res) => {
+  const { app_id, channel } = req.body;
+  if (!app_id || !channel) {
+    logger.error('[UnregisterAgent] missing required fields: app_id, channel');
+    return res.status(400).json({ error: 'Missing app_id or channel' });
+  }
+
+  const entry = unregisterAgent(app_id, channel);
+  if (!entry) {
+    logger.info(`[UnregisterAgent] no agent registered for ${app_id}:${channel}`);
+    return res.json({ success: true, message: 'No agent was registered for this channel' });
+  }
+
+  // Stop audio subscriber session for this channel
+  audioSubscriber.stopSession(app_id, channel);
+
+  // Notify modules (e.g. Thymia disconnect)
+  for (const mod of modules) {
+    if (mod.onAgentUnregistered) {
+      mod.onAgentUnregistered(app_id, channel, entry.agentId);
+    }
+  }
+
+  logger.info(`[UnregisterAgent] cleaned up ${app_id}:${channel} (agent=${entry.agentId})`);
+  res.json({ success: true, agent_id: entry.agentId });
 });
 
 // ─── Helpers ───
 
 function extractContext(body) {
   const ctx = body.context || {};
-  return {
-    appId: ctx.appId || '',
-    userId: ctx.userId || '',
-    channel: ctx.channel || 'default',
-  };
+
+  // ConvoAI custom vendor sends RTC params in the model params
+  // which appear at the top level of the request body
+  const appId = body.app_id || ctx.appId || process.env.AGORA_APP_ID || '';
+  const channel = body.channel || ctx.channel || '';
+  const userId = body.user_uid || ctx.userId || '';
+  const agentUid = body.agent_uid || '';
+  const subscriberToken = body.subscriber_token || '';
+  const rtmToken = body.rtm_token || '';
+  const rtmUid = body.rtm_uid || '';
+
+  return { appId, userId, channel: channel || 'default', agentUid, subscriberToken, rtmToken, rtmUid };
 }
 
+/**
+ * Aggregate tool definitions from base tools + all modules.
+ */
 function getToolsForRequest(requestTools) {
   if (requestTools && requestTools.length > 0) return requestTools;
-  return TOOL_DEFINITIONS;
+  const tools = [...TOOL_DEFINITIONS];
+  for (const mod of modules) {
+    if (mod.getToolDefinitions) {
+      tools.push(...mod.getToolDefinitions());
+    }
+  }
+  return tools;
 }
+
+/**
+ * Build merged tool handler map from base tools + all modules.
+ */
+function getMergedToolMap() {
+  const merged = { ...TOOL_MAP };
+  for (const mod of modules) {
+    if (mod.getToolHandlers) {
+      Object.assign(merged, mod.getToolHandlers());
+    }
+  }
+  return merged;
+}
+
+const mergedToolMap = getMergedToolMap();
 
 function buildMessagesWithHistory(appId, userId, channel, requestMessages) {
   const history = getMessages(appId, userId, channel);
@@ -131,7 +262,7 @@ function executeTools(toolCalls, appId, userId, channel) {
     const argsStr = tc.function?.arguments || '{}';
     const tcId = tc.id || '';
 
-    const fn = TOOL_MAP[name];
+    const fn = mergedToolMap[name];
     if (!fn) {
       logger.error(`Unknown tool: ${name}`);
       results.push({
@@ -173,7 +304,7 @@ app.post('/chat/completions', async (req, res) => {
     logger.info(`Received request: ${JSON.stringify(req.body)}`);
 
     const {
-      model = LLM_MODEL,
+      model = DEFAULT_LLM_MODEL,
       messages: requestMessages,
       modalities = ['text'],
       tools: requestTools,
@@ -191,7 +322,31 @@ app.post('/chat/completions', async (req, res) => {
         .json({ detail: 'Missing messages in request body' });
     }
 
-    const { appId, userId, channel } = extractContext(req.body);
+    const { appId, userId, channel, agentUid, subscriberToken, rtmToken, rtmUid } = extractContext(req.body);
+    const client = getOpenAIClient(req);
+
+    logger.info(`Context: appId=${appId}, userId=${userId}, channel=${channel}, model=${model}`);
+
+    // Initialize RTM from request params on first call (non-blocking)
+    if (appId && channel && channel !== 'default' && rtmUid) {
+      const rtm = require('./rtm_client');
+      if (!rtm.isConnected()) {
+        rtm.initRTMWithParams(appId, rtmUid, rtmToken, channel).catch((e) => {
+          logger.error('RTM init from params failed:', e);
+        });
+      }
+    }
+
+    // Module onRequest hooks (auto-start audio, connect services, forward transcripts)
+    const moduleCtx = { appId, userId, channel, agentUid, subscriberToken, messages: requestMessages, req };
+    for (const mod of modules) {
+      if (mod.onRequest) mod.onRequest(moduleCtx);
+    }
+
+    // GPT-5.x reasoning models use max_completion_tokens instead of max_tokens
+    // and don't support temperature
+    const isReasoningModel = model && model.toLowerCase().startsWith('gpt-5');
+
     const tools = getToolsForRequest(requestTools);
     let messages = buildMessagesWithHistory(
       appId,
@@ -200,16 +355,31 @@ app.post('/chat/completions', async (req, res) => {
       requestMessages
     );
 
+    // Inject system messages from modules (e.g. biomarker context)
+    for (const mod of modules) {
+      if (mod.getSystemInjection) {
+        const injection = mod.getSystemInjection(appId, channel);
+        logger.info(`[SystemInjection] module=${mod.name || 'unknown'} hasInjection=${!!injection}${injection ? ` content="${injection.substring(0, 200)}"` : ''}`);
+        if (injection) {
+          messages.unshift({ role: 'system', content: injection });
+        }
+      }
+    }
+
     if (!stream) {
       // ── Non-streaming with multi-pass tool execution ──
       let finalResponse = null;
       for (let pass = 0; pass < 5; pass++) {
-        const response = await openai.chat.completions.create({
+        const completionParams = {
           model,
           messages,
           tools: tools.length ? tools : undefined,
           tool_choice: tools.length && tool_choice ? tool_choice : undefined,
-        });
+        };
+        if (isReasoningModel) {
+          completionParams.max_completion_tokens = 1024;
+        }
+        const response = await client.chat.completions.create(completionParams);
 
         finalResponse = response;
         const choice = response.choices[0];
@@ -221,6 +391,10 @@ app.post('/chat/completions', async (req, res) => {
               role: 'assistant',
               content,
             });
+            // Module onResponse hooks
+            for (const mod of modules) {
+              if (mod.onResponse) mod.onResponse({ appId, userId, channel, content });
+            }
           }
           return res.json(response);
         }
@@ -257,14 +431,18 @@ app.post('/chat/completions', async (req, res) => {
     let currentMessages = [...messages];
 
     for (let pass = 0; pass < 5; pass++) {
-      const completion = await openai.chat.completions.create({
+      const streamParams = {
         model,
         messages: currentMessages,
         tools: tools.length ? tools : undefined,
         tool_choice: tools.length && tool_choice ? tool_choice : undefined,
         response_format,
         stream: true,
-      });
+      };
+      if (isReasoningModel) {
+        streamParams.max_completion_tokens = 1024;
+      }
+      const completion = await client.chat.completions.create(streamParams);
 
       let accumulatedToolCalls = [];
       let accumulatedContent = '';
@@ -323,6 +501,10 @@ app.post('/chat/completions', async (req, res) => {
           role: 'assistant',
           content: accumulatedContent,
         });
+        // Module onResponse hooks
+        for (const mod of modules) {
+          if (mod.onResponse) mod.onResponse({ appId, userId, channel, content: accumulatedContent });
+        }
       }
       break;
     }
@@ -357,7 +539,7 @@ app.post('/rag/chat/completions', async (req, res) => {
     logger.info(`Received RAG request: ${JSON.stringify(req.body)}`);
 
     const {
-      model = LLM_MODEL,
+      model = DEFAULT_LLM_MODEL,
       messages: requestMessages,
       modalities = ['text'],
       tools: requestTools,
@@ -421,7 +603,8 @@ app.post('/rag/chat/completions', async (req, res) => {
     const ragMessages = refactMessages(retrievedContext, messages);
 
     // Create streaming completion
-    const completion = await openai.chat.completions.create({
+    const ragClient = getOpenAIClient(req);
+    const completion = await ragClient.chat.completions.create({
       model,
       messages: ragMessages,
       tools: requestTools ? requestTools : undefined,
@@ -664,7 +847,7 @@ async function handleRTMMessage(event) {
       { role: 'user', content: messageText },
     ]);
 
-    const tools = TOOL_DEFINITIONS;
+    const tools = getToolsForRequest(null);
 
     // Multi-pass non-streaming tool execution
     let currentMessages = [...messages];
@@ -672,7 +855,7 @@ async function handleRTMMessage(event) {
 
     for (let pass = 0; pass < 5; pass++) {
       const response = await openai.chat.completions.create({
-        model: LLM_MODEL,
+        model: DEFAULT_LLM_MODEL,
         messages: currentMessages,
         tools: tools.length ? tools : undefined,
       });
@@ -725,9 +908,27 @@ async function handleRTMMessage(event) {
   }
 }
 
+// ─── Process cleanup ───
+
+function shutdownAll() {
+  audioSubscriber.shutdownAll();
+  for (const mod of modules) {
+    if (mod.shutdown) mod.shutdown();
+  }
+}
+
+process.on('exit', shutdownAll);
+process.on('SIGINT', () => { shutdownAll(); process.exit(0); });
+process.on('SIGTERM', () => { shutdownAll(); process.exit(0); });
+
 // Start server
 app.listen(port, () => {
   logger.info(`Server running on port ${port}`);
+  logger.info(`AudioSubscriber initialized`);
+
+  if (modules.length > 0) {
+    logger.info(`Modules loaded: ${modules.map((m) => m.name).join(', ')}`);
+  }
 
   // Initialize RTM (non-blocking, optional)
   initRTM();

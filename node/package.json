@@ -17,10 +17,11 @@
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
     "morgan": "^1.10.0",
-    "openai": "^4.20.0"
+    "openai": "^4.20.0",
+    "ws": "^8.18.0"
   },
   "optionalDependencies": {
-    "rtm-nodejs": "^2.2.2"
+    "rtm-nodejs": "^2.1.5-beta.1"
   },
   "devDependencies": {
     "nodemon": "^3.1.0"

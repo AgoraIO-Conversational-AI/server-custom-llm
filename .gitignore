@@ -4,3 +4,6 @@ __pycache__/
 *.pyc
 .env
 go/server-custom-llm
+go-audio-subscriber/sdk/agora_sdk/
+go-audio-subscriber/sdk/agora_sdk_mac/
+go-audio-subscriber/bin/
