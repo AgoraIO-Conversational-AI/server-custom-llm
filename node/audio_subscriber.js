@@ -94,7 +94,7 @@ class AudioSubscriber extends EventEmitter {
       const macSdkDir = path.join(sdkDir, 'agora_sdk_mac');
       env.DYLD_LIBRARY_PATH = [macSdkDir, env.DYLD_LIBRARY_PATH].filter(Boolean).join(':');
     } else {
-      const linuxSdkDir = path.resolve(__dirname, '../go-audio-subscriber/agora_sdk');
+      const linuxSdkDir = path.resolve(__dirname, '../go-audio-subscriber/sdk/agora_sdk');
       env.LD_LIBRARY_PATH = [linuxSdkDir, env.LD_LIBRARY_PATH].filter(Boolean).join(':');
     }
 

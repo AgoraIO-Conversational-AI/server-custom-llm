@@ -40,9 +40,18 @@ Thymia provides real-time voice biomarker analysis — detecting emotions, welln
 
 ### Configuration
 
+Create a `node/.env` file (or set environment variables) with the following:
+
 ```bash
-export THYMIA_ENABLED=true
-export THYMIA_API_KEY=your_sentinel_api_key
+# Required
+THYMIA_ENABLED=true
+THYMIA_API_KEY=your_sentinel_api_key
+
+# Server port (default 8101)
+PORT=8100
+
+# Optional
+THYMIA_WS_URL=wss://ws.thymia.ai
 ```
 
 | Variable | Description | Default |
@@ -50,11 +59,18 @@ export THYMIA_API_KEY=your_sentinel_api_key
 | `THYMIA_ENABLED` | Enable Thymia voice biomarker module | `false` |
 | `THYMIA_API_KEY` | Thymia Sentinel API key | _(required when enabled)_ |
 | `THYMIA_WS_URL` | Sentinel WebSocket endpoint | `wss://ws.thymia.ai` |
+| `PORT` | Server listen port | `8101` |
 
-The Go audio subscriber binary must be built first:
+No `LLM_API_KEY` is needed in the `.env` — the Agora ConvoAI backend passes the OpenAI API key through in each request.
+
+### Prerequisites
+
+The Go audio subscriber binary must be built before Thymia can capture audio. See [go-audio-subscriber/README.md](../../go-audio-subscriber/README.md) for full instructions.
 
 ```bash
-cd ../../go-audio-subscriber && make build
+cd ../../go-audio-subscriber
+cd sdk && bash scripts/install_agora_sdk.sh && cd ..
+make build
 ```
 
 ### Files

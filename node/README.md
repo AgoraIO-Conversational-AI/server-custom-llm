@@ -199,10 +199,76 @@ Real-time voice biomarker analysis — emotions, wellness (stress, burnout, fati
 
 Enable with `THYMIA_ENABLED=true` and `THYMIA_API_KEY`. Full details: **[integrations/README.md](integrations/README.md)**.
 
+## Running with PM2
+
+For production, use [PM2](https://pm2.keymetrics.io/) for process management, auto-restart, and log rotation.
+
+**Add to your `ecosystem.config.js`:**
+
+```javascript
+{
+  name: "server-custom-llm",
+  cwd: "/path/to/server-custom-llm/node",
+  script: "custom_llm.js",
+  env: {
+    PORT: 8100,
+    THYMIA_ENABLED: "true",
+    THYMIA_API_KEY: "your_sentinel_api_key",
+  },
+  watch: false,
+  max_memory_restart: "300M",
+}
+```
+
+**Start and manage:**
+
+```bash
+pm2 start ecosystem.config.js --only server-custom-llm
+pm2 save                  # Persist across reboots
+pm2 restart server-custom-llm
+pm2 stop server-custom-llm
+```
+
+### Log Locations
+
+PM2 writes logs to `~/.pm2/logs/`:
+
+| File | Content |
+|------|---------|
+| `server-custom-llm-out.log` | stdout — request logs, RTM status, Thymia progress, biomarker events |
+| `server-custom-llm-error.log` | stderr — errors, RTM failures, stack traces |
+
+**Tail logs:**
+
+```bash
+pm2 logs server-custom-llm           # Live tail (both stdout + stderr)
+pm2 logs server-custom-llm --lines 50  # Last 50 lines
+```
+
+**Flush logs:**
+
+```bash
+pm2 flush server-custom-llm
+```
+
 ## Expose to the Internet
 
 ```bash
 cloudflared tunnel --url http://localhost:8101
+```
+
+Or place behind nginx with prefix stripping:
+
+```nginx
+location ^~ /custom-llm/ {
+    proxy_pass http://localhost:8100/;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_read_timeout 300s;
+}
 ```
 
 ## License
