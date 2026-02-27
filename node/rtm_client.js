@@ -77,10 +77,11 @@ async function _initWithParams(appId, userId, token, channel) {
   try {
     const AgoraRTM = require('rtm-nodejs');
 
-    rtmClient = new AgoraRTM.RTM(appId, userId);
+    // rtm-nodejs requires token in constructor config (not in login() args)
+    const rtmConfig = token ? { token } : {};
+    rtmClient = new AgoraRTM.RTM(appId, userId, rtmConfig);
 
-    const loginOptions = token ? { token } : {};
-    await rtmClient.login(loginOptions);
+    await rtmClient.login();
     logger.info(`Logged in as ${userId}`);
 
     if (channel) {
