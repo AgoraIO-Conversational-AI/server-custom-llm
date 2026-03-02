@@ -192,6 +192,12 @@ class AudioSubscriber extends EventEmitter {
       const msg = JSON.parse(payload.toString());
       logger.info(`[child:${session.channel}] ${msg.type}: ${msg.status || msg.error || msg.message}`);
       this.emit('status', session.appId, session.channel, msg);
+
+      // Auto-cleanup when child reports target left or subscriber stopped
+      if (msg.status === 'target_left' || (msg.status === 'stopped' && !session.stopped)) {
+        logger.info(`Auto-stopping session for ${session.channel} (child reported: ${msg.status})`);
+        this.stopSession(session.appId, session.channel);
+      }
     } catch (e) {
       logger.error('Failed to parse child status JSON:', e);
     }

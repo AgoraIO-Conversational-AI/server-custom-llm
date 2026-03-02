@@ -105,6 +105,9 @@ func main() {
 					Status:  "stopped",
 					Message: "Subscriber stopped",
 				})
+				// Target left or subscriber stopped — exit process
+				logger.Println("Subscriber finished, exiting process")
+				os.Exit(0)
 			}()
 
 		case "stop":
