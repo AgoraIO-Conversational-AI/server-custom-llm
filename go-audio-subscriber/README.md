@@ -1,16 +1,68 @@
-# Go Audio Subscriber
+# Audio Subscriber
 
-Joins an Agora RTC channel and captures the user's audio as 16kHz mono 16-bit PCM. Communicates with the Node.js custom LLM server via stdin/stdout using a binary framing protocol.
+Go child process that joins an Agora RTC channel and captures raw PCM audio from a specific user. Designed to run as a subprocess spawned by the Node.js Custom LLM Server (`node/audio_subscriber.js`).
 
-Used by the Thymia integration to stream live audio to the Thymia Sentinel API for voice biomarker analysis.
+## How It Works
 
-## Prerequisites
+The Node.js server spawns this binary as a child process. Communication uses stdin/stdout:
 
-- **Go 1.21+**
-- **Linux** (Ubuntu 18.04+) for production. macOS works for development.
-- **Agora native SDK** — downloaded automatically by the install script (~240 MB)
+- **stdin** — newline-delimited JSON commands from the Node.js parent
+- **stdout** — binary framed protocol: `[1-byte type][4-byte BE length][payload]`
+- **stderr** — log output (captured by Node.js parent)
 
-## Setup
+```
+┌──────────────┐   stdin (JSON)    ┌──────────────────┐
+│ Node.js      │ ────────────────→ │ audio_subscriber │
+│ Server       │                   │ (Go binary)      │
+│              │ ←──────────────── │                  │
+│ audio_       │  stdout (framed)  │ Joins Agora RTC  │
+│ subscriber.js│                   │ channel, captures│
+└──────────────┘                   │ PCM audio        │
+                                   └──────────────────┘
+```
+
+### Frame Types
+
+| Type        | Value  | Payload                                      |
+| ----------- | ------ | -------------------------------------------- |
+| JSON status | `0x01` | JSON object with `type`, `status`, `message` |
+| PCM audio   | `0x02` | Raw 16kHz mono 16-bit PCM bytes              |
+
+### Commands (stdin)
+
+**start** — join a channel and subscribe to a target user's audio:
+
+```json
+{
+  "type": "start",
+  "appId": "your_app_id",
+  "channel": "channel_name",
+  "botUid": "5000",
+  "token": "rtc_token",
+  "targetUid": "user_uid_to_capture"
+}
+```
+
+**stop** — disconnect and exit:
+
+```json
+{ "type": "stop" }
+```
+
+### Status Messages (stdout, type 0x01)
+
+```json
+{"type": "status", "status": "started",     "message": "Audio subscriber ready for commands"}
+{"type": "status", "status": "connected",    "message": "Connected to channel room1"}
+{"type": "status", "status": "subscribed",   "message": "Subscribed to UID 123", "uid": "123"}
+{"type": "status", "status": "ready",        "message": "Subscribed to UID 123 in channel room1"}
+{"type": "status", "status": "target_left",  "message": "Target UID 123 left", "uid": "123"}
+{"type": "status", "status": "stopped",      "message": "Subscriber stopped"}
+```
+
+## Build
+
+Requires Go 1.21+ and CGO (the Agora SDK is a native library).
 
 ### 1. Install the Agora native SDK (one-time)
 
@@ -19,6 +71,7 @@ cd sdk && bash scripts/install_agora_sdk.sh && cd ..
 ```
 
 This downloads the platform-specific Agora RTC/RTM shared libraries to:
+
 - **Linux:** `sdk/agora_sdk/` (`.so` files)
 - **macOS:** `sdk/agora_sdk_mac/` (`.dylib` files)
 
@@ -28,57 +81,72 @@ This downloads the platform-specific Agora RTC/RTM shared libraries to:
 make build
 ```
 
-The binary is output to `bin/audio_subscriber`.
+The binary is built to `bin/audio_subscriber`.
 
-### 3. Verify the build
+### Platform-Specific SDK
+
+The Agora native SDK libraries are in `sdk/`:
+
+| Platform | SDK directory        | Library path env    |
+| -------- | -------------------- | ------------------- |
+| macOS    | `sdk/agora_sdk_mac/` | `DYLD_LIBRARY_PATH` |
+| Linux    | `sdk/agora_sdk/`     | `LD_LIBRARY_PATH`   |
+
+The Node.js wrapper (`audio_subscriber.js`) sets the library path automatically when spawning the child process.
+
+### Running Standalone (for testing)
 
 ```bash
-# Linux
-LD_LIBRARY_PATH=$(pwd)/sdk/agora_sdk ./bin/audio_subscriber --help
-
 # macOS
-DYLD_LIBRARY_PATH=$(pwd)/sdk/agora_sdk_mac ./bin/audio_subscriber --help
+DYLD_LIBRARY_PATH=$(pwd)/sdk/agora_sdk_mac ./bin/audio_subscriber
+
+# Linux
+LD_LIBRARY_PATH=$(pwd)/sdk/agora_sdk ./bin/audio_subscriber
 ```
 
-## Runtime library path
+Then send a start command on stdin as JSON.
 
-The Go binary links against native Agora SDK shared libraries at runtime. The Node.js `audio_subscriber.js` wrapper sets the library path automatically when spawning the child process:
+## Configuration
 
-- **Linux:** `LD_LIBRARY_PATH` → `sdk/agora_sdk/`
-- **macOS:** `DYLD_LIBRARY_PATH` → `sdk/agora_sdk_mac/`
+The audio subscriber is configured entirely via the start command from the Node.js parent. No environment variables are required.
 
-If running the binary manually, you must set the appropriate library path or the binary will fail immediately.
+| Field       | Description                                  |
+| ----------- | -------------------------------------------- |
+| `appId`     | Agora App ID                                 |
+| `channel`   | RTC channel name to join                     |
+| `botUid`    | UID for the subscriber bot (default: `5000`) |
+| `token`     | RTC token for authentication                 |
+| `targetUid` | UID of the user whose audio to capture       |
 
-## Protocol
+## Audio Format
 
-The Node.js server communicates with the Go binary via stdin (commands) and stdout (framed data).
+- Sample rate: 16,000 Hz
+- Channels: mono
+- Bit depth: 16-bit signed PCM
+- Byte order: little-endian
 
-**stdin (JSON commands, newline-delimited):**
+## Integration
 
-```json
-{"type": "start", "appId": "...", "channel": "...", "botUid": "5000", "token": "...", "targetUid": "101"}
-{"type": "stop"}
-```
+The Node.js wrapper (`node/audio_subscriber.js`) manages the lifecycle:
 
-**stdout (binary framing):**
+- Spawns the Go binary with the correct library path
+- Sends start/stop commands
+- Parses the binary framing protocol
+- Emits `audio`, `status`, `error`, and `stopped` events
+- Auto-restarts on crash with exponential backoff (2s-30s, up to 5 attempts)
 
-| Field | Size | Description |
-|-------|------|-------------|
-| Type | 1 byte | `0x01` = JSON status, `0x02` = PCM audio |
-| Length | 4 bytes (big-endian) | Payload size |
-| Payload | _Length_ bytes | JSON string or raw PCM data |
+The Thymia integration consumes audio events to stream PCM to the Thymia Sentinel API for voice biomarker analysis.
 
-**stderr:** Log messages (forwarded to Node.js server logs).
-
-## File Structure
+## Files
 
 ```
 go-audio-subscriber/
   main.go           # Entry point, stdin command loop
-  subscriber.go     # RTC connection, audio capture, stdout framing
-  protocol.go       # Framing protocol constants and helpers
+  subscriber.go     # Agora RTC connection and audio capture
+  protocol.go       # Binary framing protocol (stdout)
   Makefile           # Build targets
-  sdk/              # Agora native SDK (downloaded, not committed)
+  bin/               # Built binary output
+  sdk/               # Agora native SDK (Go bindings + native libraries)
     agora_sdk/      # Linux .so files
     agora_sdk_mac/  # macOS .dylib files
     go_sdk/         # Go SDK bindings

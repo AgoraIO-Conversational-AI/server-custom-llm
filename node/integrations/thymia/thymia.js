@@ -12,8 +12,8 @@
  */
 
 const https = require('https');
-const { ThymiaClient } = require('../thymia_client');
-const thymiaStore = require('../thymia_store');
+const { ThymiaClient } = require('./thymia_client');
+const thymiaStore = require('./thymia_store');
 
 const logger = {
   info: (message) => console.log(`INFO: [ThymiaModule] ${message}`),
@@ -98,7 +98,7 @@ function formatBiomarkerSummary(metrics) {
  */
 function pushBiomarkersViaRTM(channel, metrics) {
   try {
-    const rtm = require('../rtm_client');
+    const rtm = require('../../rtm_client');
     const keys = Object.keys(metrics.biomarkers || {}).filter(k => {
       const v = metrics.biomarkers[k];
       return v !== null && v !== undefined && typeof v === 'number' && Math.abs(v) >= 0.001;
@@ -128,7 +128,7 @@ function pushBiomarkersViaRTM(channel, metrics) {
  */
 function pushProgressViaRTM(channel, progressData) {
   try {
-    const rtm = require('../rtm_client');
+    const rtm = require('../../rtm_client');
     const summary = Object.entries(progressData).map(([k, v]) =>
       `${k}:${v.speech_seconds.toFixed(1)}/${v.trigger_seconds}s${v.processing ? '*' : ''}`
     ).join(' ');

@@ -6,24 +6,26 @@ Implementations in Python, Node.js, and Go — all provide the same OpenAI-compa
 
 ## Features
 
-| Feature | Python | Node.js | Go |
-|---------|--------|---------|-----|
-| Streaming chat completions | Yes | Yes | Yes |
-| Non-streaming chat completions | Yes | Yes | Yes |
-| Server-side tool execution (multi-pass) | Yes | Yes | Yes |
-| Conversation memory (per-channel) | Yes | Yes | Yes |
-| RAG retrieval (keyword-based) | Yes | Yes | Yes |
-| Multimodal audio responses | Yes | Yes | Yes |
-| Health check endpoint | `/docs` | `/ping` | `/ping` |
-| RTM text messaging | -- | Yes | -- |
+| Feature                                 | Python  | Node.js | Go      |
+| --------------------------------------- | ------- | ------- | ------- |
+| Streaming chat completions              | Yes     | Yes     | Yes     |
+| Non-streaming chat completions          | Yes     | Yes     | Yes     |
+| Server-side tool execution (multi-pass) | Yes     | Yes     | Yes     |
+| Conversation memory (per-channel)       | Yes     | Yes     | Yes     |
+| RAG retrieval (keyword-based)           | Yes     | Yes     | Yes     |
+| Multimodal audio responses              | Yes     | Yes     | Yes     |
+| Health check endpoint                   | `/docs` | `/ping` | `/ping` |
+| RTM text messaging                      | --      | Yes     | --      |
+| Audio subscriber (RTC audio capture)    | --      | Yes     | --      |
+| Thymia voice biomarkers                 | --      | Yes     | --      |
 
 ## Quick Start
 
-| Language | Framework | Port | Guide |
-|----------|-----------|------|-------|
-| Python | FastAPI + uvicorn | 8100 | [python/](./python/) |
-| Node.js | Express | 8101 | [node/](./node/) |
-| Go | Gin | 8102 | [go/](./go/) |
+| Language | Framework         | Port | Guide                |
+| -------- | ----------------- | ---- | -------------------- |
+| Python   | FastAPI + uvicorn | 8100 | [python/](./python/) |
+| Node.js  | Express           | 8101 | [node/](./node/)     |
+| Go       | Gin               | 8102 | [go/](./go/)         |
 
 ## How It Works
 
@@ -88,11 +90,11 @@ Returns audio responses with transcript. Reads a text file for the transcript an
 
 All three languages use the same env vars with backward-compatible fallbacks:
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `LLM_API_KEY` | API key for LLM provider | _(required)_ |
-| `LLM_BASE_URL` | LLM API base URL | `https://api.openai.com/v1` |
-| `LLM_MODEL` | Default model name | `gpt-4o-mini` |
+| Variable       | Description              | Default                     |
+| -------------- | ------------------------ | --------------------------- |
+| `LLM_API_KEY`  | API key for LLM provider | _(required)_                |
+| `LLM_BASE_URL` | LLM API base URL         | `https://api.openai.com/v1` |
+| `LLM_MODEL`    | Default model name       | `gpt-4o-mini`               |
 
 Legacy variables `YOUR_LLM_API_KEY` and `OPENAI_API_KEY` are also accepted as
 fallbacks for `LLM_API_KEY`.
@@ -121,8 +123,8 @@ Engine sends these values in the request `context` field:
 
 ```json
 {
-  "context": {"appId": "abc123", "userId": "user42", "channel": "room1"},
-  "messages": [{"role": "user", "content": "Hello"}],
+  "context": { "appId": "abc123", "userId": "user42", "channel": "room1" },
+  "messages": [{ "role": "user", "content": "Hello" }],
   "stream": true
 }
 ```

@@ -2,7 +2,7 @@
 
 Node.js implementation using Express. Default port: **8101**.
 
-This is the only implementation with RTM text messaging and Thymia voice biomarker support.
+This is the only implementation with RTM text messaging, audio subscriber (RTC audio capture), and Thymia voice biomarker support.
 
 ## Quick Start
 
@@ -24,34 +24,34 @@ Set your LLM API key:
 export LLM_API_KEY=sk-...
 ```
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `LLM_API_KEY` | API key for LLM provider | _(required)_ |
-| `LLM_BASE_URL` | LLM API base URL | `https://api.openai.com/v1` |
-| `LLM_MODEL` | Default model name | `gpt-4o-mini` |
+| Variable       | Description              | Default                     |
+| -------------- | ------------------------ | --------------------------- |
+| `LLM_API_KEY`  | API key for LLM provider | _(required)_                |
+| `LLM_BASE_URL` | LLM API base URL         | `https://api.openai.com/v1` |
+| `LLM_MODEL`    | Default model name       | `gpt-4o-mini`               |
 
 Legacy env vars `YOUR_LLM_API_KEY` and `OPENAI_API_KEY` are also accepted.
 
 **RTM (optional):**
 
-| Variable | Description |
-|----------|-------------|
-| `AGORA_APP_ID` | Agora App ID |
-| `AGORA_RTM_TOKEN` | RTM token (optional for testing) |
-| `AGORA_RTM_USER_ID` | Agent's RTM user ID |
-| `AGORA_RTM_CHANNEL` | RTM channel to subscribe to |
+| Variable            | Description                      |
+| ------------------- | -------------------------------- |
+| `AGORA_APP_ID`      | Agora App ID                     |
+| `AGORA_RTM_TOKEN`   | RTM token (optional for testing) |
+| `AGORA_RTM_USER_ID` | Agent's RTM user ID              |
+| `AGORA_RTM_CHANNEL` | RTM channel to subscribe to      |
 
 RTM can also initialize dynamically from request parameters — see [RTM Integration](#rtm-integration).
 
 **Thymia (optional):**
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `THYMIA_ENABLED` | Enable Thymia voice biomarker module | `false` |
-| `THYMIA_API_KEY` | Thymia Sentinel API key | _(required when enabled)_ |
-| `THYMIA_WS_URL` | Sentinel WebSocket endpoint | `wss://ws.thymia.ai` |
+| Variable         | Description                          | Default                   |
+| ---------------- | ------------------------------------ | ------------------------- |
+| `THYMIA_ENABLED` | Enable Thymia voice biomarker module | `false`                   |
+| `THYMIA_API_KEY` | Thymia Sentinel API key              | _(required when enabled)_ |
+| `THYMIA_WS_URL`  | Sentinel WebSocket endpoint          | `wss://ws.thymia.ai`      |
 
-See [integrations/README.md](integrations/README.md) for full Thymia details.
+See [integrations/thymia/README.md](integrations/thymia/README.md) for full Thymia details.
 
 ### Run
 
@@ -90,10 +90,12 @@ node/
   conversation_store.js   # In-memory conversation store with trimming
   rtm_client.js           # RTM integration (optional, requires rtm-nodejs)
   audio_subscriber.js     # RTC audio capture wrapper (Go child process)
-  thymia_client.js        # Thymia Sentinel WebSocket client
-  thymia_store.js         # In-memory biomarker results store
   integrations/
-    thymia.js             # Thymia module plugin (hooks into custom_llm.js)
+    thymia/               # Thymia voice biomarker module
+      thymia.js           # Module plugin (hooks into custom_llm.js)
+      thymia_client.js    # Thymia Sentinel WebSocket client
+      thymia_store.js     # In-memory biomarker results store
+      README.md           # Setup and configuration guide
   package.json
 ```
 
@@ -101,25 +103,26 @@ node/
 
 See the [top-level README](../README.md#endpoints) for endpoint details. All three language implementations share the same core endpoints.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/chat/completions` | Streaming LLM with tool execution |
-| `POST` | `/rag/chat/completions` | RAG-enhanced with context injection |
-| `POST` | `/audio/chat/completions` | Multimodal audio responses |
-| `POST` | `/register-agent` | Register agent for a channel (Thymia lifecycle) |
-| `POST` | `/unregister-agent` | Unregister agent and clean up resources |
-| `GET` | `/ping` | Health check — returns `{"message": "pong"}` |
-| `GET` | `/` | Lists available endpoints |
+| Method | Path                      | Description                                     |
+| ------ | ------------------------- | ----------------------------------------------- |
+| `POST` | `/chat/completions`       | Streaming LLM with tool execution               |
+| `POST` | `/rag/chat/completions`   | RAG-enhanced with context injection             |
+| `POST` | `/audio/chat/completions` | Multimodal audio responses                      |
+| `POST` | `/register-agent`         | Register agent for a channel (Thymia lifecycle) |
+| `POST` | `/unregister-agent`       | Unregister agent and clean up resources         |
+| `GET`  | `/ping`                   | Health check — returns `{"message": "pong"}`    |
+| `GET`  | `/`                       | Lists available endpoints                       |
 
 ### Agent Registration
 
-`/register-agent` and `/unregister-agent` manage agent lifecycle for integrations like Thymia. See [integrations/README.md](integrations/README.md) for request examples.
+`/register-agent` and `/unregister-agent` manage agent lifecycle for integrations like Thymia. See [integrations/thymia/README.md](integrations/thymia/README.md) for request examples.
 
 ## Adding Custom Tools
 
 Edit `tools.js`:
 
 1. Add a schema to `TOOL_DEFINITIONS`:
+
 ```javascript
 {
   type: 'function',
@@ -136,6 +139,7 @@ Edit `tools.js`:
 ```
 
 2. Implement the handler:
+
 ```javascript
 function myTool(appId, userId, channel, args) {
   return `Result for ${args.param1}`;
@@ -143,6 +147,7 @@ function myTool(appId, userId, channel, args) {
 ```
 
 3. Register in `TOOL_MAP`:
+
 ```javascript
 const TOOL_MAP = {
   my_tool: myTool,
@@ -193,11 +198,23 @@ Auto-reconnect with exponential backoff (2s–60s, up to 10 attempts).
 
 Python and Go do not include RTM because the native Agora RTM SDKs require CGO/native library compilation.
 
+## Audio Subscriber
+
+Captures RTC audio from a specific user in the Agora channel via a Go child process. The `audio_subscriber.js` wrapper spawns the Go binary, manages its lifecycle, and emits PCM audio events for consumers like the Thymia integration.
+
+Requires building the Go binary first:
+
+```bash
+cd ../go-audio-subscriber && make build
+```
+
+Full details: **[go-audio-subscriber/README.md](../go-audio-subscriber/README.md)**.
+
 ## Thymia Integration
 
-Real-time voice biomarker analysis — emotions, wellness (stress, burnout, fatigue), and clinical markers from the user's voice. Captures RTC audio via a Go child process, streams it to Thymia Sentinel, and pushes results to both the LLM (system message injection) and the client UI (via RTM).
+Real-time voice biomarker analysis — emotions, wellness (stress, burnout, fatigue), and clinical markers from the user's voice. Captures RTC audio via the audio subscriber, streams it to Thymia Sentinel, and pushes results to both the LLM (system message injection) and the client UI (via RTM).
 
-Enable with `THYMIA_ENABLED=true` and `THYMIA_API_KEY`. Full details: **[integrations/README.md](integrations/README.md)**.
+Enable with `THYMIA_ENABLED=true` and `THYMIA_API_KEY`. Full details: **[integrations/thymia/README.md](integrations/thymia/README.md)**.
 
 ## Running with PM2
 

@@ -57,7 +57,7 @@ const modules = [];
 const audioSubscriber = new AudioSubscriber();
 
 if (THYMIA_ENABLED) {
-  const thymiaModule = require('./integrations/thymia');
+  const thymiaModule = require('./integrations/thymia/thymia');
   thymiaModule.init(audioSubscriber, { rtmClient: () => rtmClient });
   modules.push(thymiaModule);
 }
