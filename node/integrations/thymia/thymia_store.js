@@ -73,9 +73,9 @@ function updateFromPolicyResult(appId, channel, result) {
   if (result.policy === 'passthrough' && biomarkers) {
     const b = biomarkers;
 
-    // Store ALL biomarkers generically (emotions, wellness, clinical, etc.)
+    // Store ALL numeric biomarkers generically (emotions, wellness, clinical, etc.)
     for (const [name, value] of Object.entries(b)) {
-      if (value !== undefined && value !== null) {
+      if (typeof value === 'number') {
         data.biomarkers[name] = value;
       }
     }
@@ -98,7 +98,7 @@ function updateFromPolicyResult(appId, channel, result) {
     const safeBio = inner.biomarkers || inner.biomarker_summary;
     if (safeBio) {
       for (const [name, value] of Object.entries(safeBio)) {
-        if (value !== undefined && value !== null) {
+        if (typeof value === 'number') {
           data.biomarkers[name] = value;
         }
       }
