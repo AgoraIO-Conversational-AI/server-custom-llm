@@ -14,6 +14,7 @@
 const https = require('https');
 const { ThymiaClient } = require('./thymia_client');
 const thymiaStore = require('./thymia_store');
+const agentUpdater = require('../../agent_updater');
 
 const logger = {
   info: (message) => console.log(`INFO: [ThymiaModule] ${message}`),
@@ -213,12 +214,11 @@ function buildBiomarkerInjection(metrics) {
 }
 
 /**
- * Call Agora Agent Update API to push system_messages with biomarker context.
+ * Push biomarkers via shared agent updater (combined with other modules like Shen).
  */
 function pushBiomarkersViaAgentUpdate(appId, channel, metrics) {
   const key = getKey(appId, channel);
-  const agent = agentMap.get(key);
-  if (!agent) {
+  if (!agentUpdater.getAgent(appId, channel)) {
     logger.debug(`[AgentUpdate] no agent registered for ${key}, skipping`);
     return;
   }
@@ -229,61 +229,10 @@ function pushBiomarkersViaAgentUpdate(appId, channel, metrics) {
     return;
   }
 
-  const { agentId, authHeader, agentEndpoint } = agent;
-  // agentEndpoint is like: https://api.agora.io/api/conversational-ai-agent/v2/projects
-  const updateUrl = `${agentEndpoint}/${appId}/agents/${agentId}/update`;
-  const ts = Date.now();
+  logger.info(`[AgentUpdate] t=${Date.now()} pushing biomarkers via shared updater content_len=${injection.length}`);
+  logger.info(`[AgentUpdate] t=${Date.now()} injection_preview="${injection.substring(0, 300)}"`);
 
-  // Include original prompt + biomarker injection (Update API replaces all system_messages)
-  const systemMessages = [];
-  if (agent.originalPrompt) {
-    systemMessages.push({ role: 'system', content: agent.originalPrompt });
-  }
-  systemMessages.push({ role: 'system', content: injection });
-
-  const payload = JSON.stringify({
-    properties: {
-      llm: {
-        system_messages: systemMessages
-      }
-    }
-  });
-
-  logger.info(`[AgentUpdate] t=${ts} pushing biomarkers to agent=${agentId} url=${updateUrl} content_len=${injection.length}`);
-  logger.info(`[AgentUpdate] t=${ts} injection_preview="${injection.substring(0, 300)}"`);
-
-  const url = new URL(updateUrl);
-  const options = {
-    hostname: url.hostname,
-    port: 443,
-    path: url.pathname,
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': authHeader,
-      'Content-Length': Buffer.byteLength(payload),
-    },
-  };
-
-  const req = https.request(options, (res) => {
-    let body = '';
-    res.on('data', (chunk) => { body += chunk; });
-    res.on('end', () => {
-      const latency = Date.now() - ts;
-      if (res.statusCode === 200) {
-        logger.info(`[AgentUpdate] t=${Date.now()} SUCCESS status=${res.statusCode} latency=${latency}ms body=${body.substring(0, 200)}`);
-      } else {
-        logger.error(`[AgentUpdate] t=${Date.now()} FAILED status=${res.statusCode} latency=${latency}ms body=${body.substring(0, 500)}`);
-      }
-    });
-  });
-
-  req.on('error', (e) => {
-    logger.error(`[AgentUpdate] t=${Date.now()} ERROR: ${e.message}`);
-  });
-
-  req.write(payload);
-  req.end();
+  agentUpdater.setInjection(appId, channel, 'thymia', injection);
 }
 
 /**
@@ -414,6 +363,7 @@ function connectThymia(appId, channel, config) {
   }
 
   const client = new ThymiaClient({
+    apiKey: config.apiKey,
     onPolicyResult: (result) => {
       const ts = Date.now();
       const bioKeys = Object.keys((result.result || {}).biomarkers || {});
@@ -632,6 +582,8 @@ module.exports = {
   onAgentRegistered(appId, channel, agentId, authHeader, agentEndpoint, prompt) {
     const key = getKey(appId, channel);
     agentMap.set(key, { agentId, authHeader, agentEndpoint, originalPrompt: prompt || null });
+    // Register with shared updater (idempotent — Shen may also register)
+    agentUpdater.registerAgent(appId, channel, agentId, authHeader, agentEndpoint, prompt);
     logger.info(`[AgentRegistered] ${key} → agent=${agentId} prompt_len=${(prompt || '').length}`);
   },
 
@@ -654,7 +606,7 @@ module.exports = {
    * Auto-starts audio + Thymia, forwards user transcript.
    */
   onRequest(ctx) {
-    const { appId, userId, channel, subscriberToken, messages } = ctx;
+    const { appId, userId, channel, subscriberToken, thymiaApiKey, messages } = ctx;
 
     if (!appId || !channel || channel === 'default') return;
 
@@ -668,13 +620,20 @@ module.exports = {
     // Auto-connect Thymia if not already connected
     const state = channelState.get(key);
     if (!state || !state.thymiaConnected) {
-      connectThymia(appId, channel, {
-        user_label: `user-${userId}-${channel}`,
-        date_of_birth: '1990-01-01',
-        birth_sex: 'MALE',
-        biomarkers: ['helios', 'apollo'],
-        policies: ['passthrough', 'safety_analysis'],
-      });
+      // API key from: 1) request params (engine forwards from llm_config.params), 2) env var
+      const apiKey = thymiaApiKey || process.env.THYMIA_API_KEY || '';
+      if (!apiKey) {
+        logger.debug(`No Thymia API key yet for ${key}, deferring connect`);
+      } else {
+        connectThymia(appId, channel, {
+          user_label: `user-${userId}-${channel}`,
+          date_of_birth: '1990-01-01',
+          birth_sex: 'MALE',
+          biomarkers: ['helios', 'apollo'],
+          policies: ['passthrough', 'safety_analysis'],
+          apiKey,
+        });
+      }
     }
 
     // Forward last user transcript to Thymia
@@ -716,8 +675,9 @@ module.exports = {
       channelState.delete(key);
     }
 
-    // Remove from agent map
+    // Remove from agent map and shared updater
     agentMap.delete(key);
+    agentUpdater.unregisterAgent(appId, channel);
 
     // Clear store data for this channel
     thymiaStore.remove(appId, channel);

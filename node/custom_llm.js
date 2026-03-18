@@ -62,6 +62,13 @@ if (THYMIA_ENABLED) {
   modules.push(thymiaModule);
 }
 
+const SHEN_ENABLED = process.env.SHEN_ENABLED === 'true';
+if (SHEN_ENABLED) {
+  const shenModule = require('./integrations/shen/shen');
+  shenModule.init(audioSubscriber, { rtmClient: () => rtmClient });
+  modules.push(shenModule);
+}
+
 // Initialize Express app
 const app = express();
 const port = process.env.PORT || 8101;
@@ -130,7 +137,7 @@ app.post('/register-agent', (req, res) => {
   }
   registerAgent(app_id, channel, agent_id, auth_header, agent_endpoint);
   logger.info(`[RegisterAgent] prompt_len=${(prompt || '').length}`);
-  // Notify modules about the agent registration (include prompt)
+  // Notify modules about the agent registration
   for (const mod of modules) {
     if (mod.onAgentRegistered) {
       mod.onAgentRegistered(app_id, channel, agent_id, auth_header, agent_endpoint, prompt);
@@ -156,6 +163,16 @@ app.post('/unregister-agent', (req, res) => {
 
   // Stop audio subscriber session for this channel
   audioSubscriber.stopSession(app_id, channel);
+
+  // Destroy RTM session for this channel
+  try {
+    const rtm = require('./rtm_client');
+    rtm.destroySession(channel).catch((e) => {
+      logger.error(`[UnregisterAgent] RTM destroy error: ${e.message}`);
+    });
+  } catch (e) {
+    // rtm_client not available
+  }
 
   // Notify modules (e.g. Thymia disconnect)
   for (const mod of modules) {
@@ -183,7 +200,9 @@ function extractContext(body) {
   const rtmToken = body.rtm_token || '';
   const rtmUid = body.rtm_uid || '';
 
-  return { appId, userId, channel: channel || 'default', agentUid, subscriberToken, rtmToken, rtmUid };
+  const thymiaApiKey = body.thymia_api_key || '';
+
+  return { appId, userId, channel: channel || 'default', agentUid, subscriberToken, rtmToken, rtmUid, thymiaApiKey };
 }
 
 /**
@@ -301,7 +320,9 @@ function executeTools(toolCalls, appId, userId, channel) {
 
 app.post('/chat/completions', async (req, res) => {
   try {
-    logger.info(`Received request: ${JSON.stringify(req.body)}`);
+    // Log non-message fields to see what engine forwards
+    const { messages: _msgs, ...reqMeta } = req.body;
+    logger.info(`Request meta (non-messages): ${JSON.stringify(reqMeta)}`);
 
     const {
       model = DEFAULT_LLM_MODEL,
@@ -322,23 +343,21 @@ app.post('/chat/completions', async (req, res) => {
         .json({ detail: 'Missing messages in request body' });
     }
 
-    const { appId, userId, channel, agentUid, subscriberToken, rtmToken, rtmUid } = extractContext(req.body);
+    const { appId, userId, channel, agentUid, subscriberToken, rtmToken, rtmUid, thymiaApiKey } = extractContext(req.body);
     const client = getOpenAIClient(req);
 
-    logger.info(`Context: appId=${appId}, userId=${userId}, channel=${channel}, model=${model}`);
+    logger.info(`Context: appId=${appId}, userId=${userId}, channel=${channel}, model=${model} thymia_key_in_params=${thymiaApiKey ? 'yes' : 'no'}`);
 
-    // Initialize RTM from request params on first call (non-blocking)
+    // Initialize RTM session for this channel (idempotent — creates once per channel)
     if (appId && channel && channel !== 'default' && rtmUid) {
       const rtm = require('./rtm_client');
-      if (!rtm.isConnected()) {
-        rtm.initRTMWithParams(appId, rtmUid, rtmToken, channel).catch((e) => {
-          logger.error('RTM init from params failed:', e);
-        });
-      }
+      rtm.initRTMWithParams(appId, rtmUid, rtmToken, channel).catch((e) => {
+        logger.error('RTM init from params failed:', e);
+      });
     }
 
     // Module onRequest hooks (auto-start audio, connect services, forward transcripts)
-    const moduleCtx = { appId, userId, channel, agentUid, subscriberToken, messages: requestMessages, req };
+    const moduleCtx = { appId, userId, channel, agentUid, subscriberToken, thymiaApiKey, messages: requestMessages, req };
     for (const mod of modules) {
       if (mod.onRequest) mod.onRequest(moduleCtx);
     }
@@ -356,14 +375,35 @@ app.post('/chat/completions', async (req, res) => {
     );
 
     // Inject system messages from modules (e.g. biomarker context)
+    // Insert after the first system message (the prompt) so the LLM has context
     for (const mod of modules) {
       if (mod.getSystemInjection) {
         const injection = mod.getSystemInjection(appId, channel);
         logger.info(`[SystemInjection] module=${mod.name || 'unknown'} hasInjection=${!!injection}${injection ? ` content="${injection.substring(0, 200)}"` : ''}`);
         if (injection) {
-          messages.unshift({ role: 'system', content: injection });
+          const sysIdx = messages.findIndex(m => m.role === 'system');
+          if (sysIdx >= 0) {
+            messages.splice(sysIdx + 1, 0, { role: 'system', content: injection });
+          } else {
+            messages.unshift({ role: 'system', content: injection });
+          }
         }
       }
+    }
+
+    // Log system messages summary so we can verify injection ordering
+    const sysMsgs = messages.filter(m => m.role === 'system');
+    for (let i = 0; i < sysMsgs.length; i++) {
+      const preview = sysMsgs[i].content.substring(0, 120).replace(/\n/g, '\\n');
+      logger.info(`[SysMsg ${i}/${sysMsgs.length}] ${preview}...`);
+    }
+
+    // Dump full messages to /tmp for debugging (enable via DUMP_LLM_MESSAGES=true)
+    if (process.env.DUMP_LLM_MESSAGES === 'true') {
+      const ts = Date.now();
+      const dumpPath = `/tmp/llm_messages_${channel}_${ts}.json`;
+      require('fs').writeFileSync(dumpPath, JSON.stringify(messages, null, 2));
+      logger.info(`[MessageDump] ${dumpPath} (${messages.length} messages)`);
     }
 
     if (!stream) {
@@ -810,16 +850,14 @@ app.post('/audio/chat/completions', async (req, res) => {
 
 // ─── RTM Integration (optional) ───
 
-let rtmClient = null;
-
 async function initRTM() {
   try {
     const rtm = require('./rtm_client');
-    rtmClient = await rtm.initRTM();
-    if (rtmClient) {
-      rtm.onRTMMessage(handleRTMMessage);
-      logger.info('RTM integration enabled');
-    }
+    // Register message handler for all sessions (current and future)
+    rtm.onRTMMessage(handleRTMMessage);
+    // Try env-var-based init (legacy)
+    await rtm.initRTM();
+    logger.info('RTM integration enabled');
   } catch (e) {
     // rtm_client.js or rtm-nodejs not available — skip silently
     logger.debug('RTM not available (optional): ' + e.message);
@@ -834,6 +872,16 @@ async function handleRTMMessage(event) {
         : event.message?.toString?.() || '';
     const channelName = event.channelName || 'default';
     const publisherUserId = event.publisher || 'unknown';
+
+    // Skip messages handled by integration modules (shen.vitals, thymia.biomarkers, etc.)
+    try {
+      const parsed = JSON.parse(messageText);
+      if (parsed.object && /^(shen\.|thymia\.)/.test(parsed.object)) {
+        return; // Already handled by the module's own RTM handler
+      }
+    } catch (_) {
+      // Not JSON — treat as a regular chat message
+    }
 
     logger.info(
       `RTM message from ${publisherUserId} on ${channelName}: ${messageText}`
@@ -920,6 +968,14 @@ function shutdownAll() {
 process.on('exit', shutdownAll);
 process.on('SIGINT', () => { shutdownAll(); process.exit(0); });
 process.on('SIGTERM', () => { shutdownAll(); process.exit(0); });
+
+// Prevent RTM WASM async errors from crashing the server
+process.on('uncaughtException', (err) => {
+  logger.error('Uncaught exception (server continues):', err);
+});
+process.on('unhandledRejection', (reason) => {
+  logger.error('Unhandled rejection (server continues):', reason);
+});
 
 // Start server
 app.listen(port, () => {

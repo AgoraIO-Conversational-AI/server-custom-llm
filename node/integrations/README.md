@@ -7,6 +7,7 @@ Optional modules that plug into `custom_llm.js` via the module system. Each modu
 | Integration         | Description                                                               | Guide                                  |
 | ------------------- | ------------------------------------------------------------------------- | -------------------------------------- |
 | [Thymia](./thymia/) | Real-time voice biomarker analysis (emotions, wellness, clinical markers) | [thymia/README.md](./thymia/README.md) |
+| [Shen](./shen/)     | Camera-based vitals (heart rate, HRV, BP, stress) via browser WASM SDK    | See shen.js                            |
 
 ## Module Interface
 

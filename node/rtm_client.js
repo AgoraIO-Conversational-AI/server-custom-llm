@@ -2,8 +2,10 @@
  * RTM (Real-Time Messaging) client for the Custom LLM Server.
  * Node.js only — uses the rtm-nodejs package.
  *
- * Can be initialized either from environment variables (legacy) or
- * dynamically from request params (appId, uid, token, channel).
+ * Manages one RTM session per channel. Each session has its own login
+ * using the appId/uid/token from the ConvoAI request params. The simple-backend
+ * generates channel-scoped RTM UIDs (e.g. "5001-{channel}") so each session
+ * has a unique identity and won't kick other sessions off.
  */
 
 const logger = {
@@ -13,18 +15,15 @@ const logger = {
   warn: (message) => console.warn(`WARN: [RTM] ${message}`),
 };
 
-let rtmClient = null;
-let defaultChannel = null;
-let subscribedChannels = new Set();
+// Per-channel sessions: Map<channel, { client, appId, uid, token, reconnectAttempts, initParams }>
+const sessions = new Map();
 let messageHandlers = [];
-let reconnectAttempts = 0;
-let lastInitParams = null;
 const MAX_RECONNECT_ATTEMPTS = 10;
 const BASE_RECONNECT_DELAY = 2000;
 const MAX_RECONNECT_DELAY = 60000;
 
 /**
- * Initialize RTM from environment variables. Returns the client or null.
+ * Initialize RTM from environment variables (legacy). Returns the client or null.
  */
 async function initRTM() {
   const appId = process.env.AGORA_APP_ID;
@@ -39,144 +38,130 @@ async function initRTM() {
     return null;
   }
 
-  return _initWithParams(appId, userId, token, channel);
+  return initRTMWithParams(appId, userId, token, channel);
 }
 
 /**
- * Initialize RTM from explicit parameters (e.g. from ConvoAI request).
- * Idempotent — if already connected, subscribes to the new channel.
+ * Initialize RTM session for a channel. Creates a new session if one doesn't
+ * exist for this channel. Idempotent — returns existing client if already connected.
  */
 async function initRTMWithParams(appId, uid, token, channel) {
-  if (!appId || !uid) {
-    logger.debug('Missing appId or uid for RTM init');
+  if (!appId || !uid || !channel) {
+    logger.debug('Missing appId, uid, or channel for RTM init');
     return null;
   }
 
-  // Already connected — just subscribe to the channel if new
-  if (rtmClient && channel && !subscribedChannels.has(channel)) {
-    try {
-      await rtmClient.subscribe(channel);
-      subscribedChannels.add(channel);
-      logger.info(`Subscribed to additional channel: ${channel}`);
-    } catch (e) {
-      logger.error(`Failed to subscribe to channel ${channel}:`, e);
-    }
-    return rtmClient;
+  // Already have a session for this channel
+  if (sessions.has(channel)) {
+    return sessions.get(channel).client;
   }
-
-  if (rtmClient) {
-    return rtmClient; // Already connected and channel already subscribed
-  }
-
-  return _initWithParams(appId, uid, token, channel);
-}
-
-async function _initWithParams(appId, userId, token, channel) {
-  lastInitParams = { appId, userId, token, channel };
 
   try {
     const AgoraRTM = require('rtm-nodejs');
 
-    // rtm-nodejs requires token in constructor config (not in login() args)
     const rtmConfig = token ? { token } : {};
-    rtmClient = new AgoraRTM.RTM(appId, userId, rtmConfig);
+    const client = new AgoraRTM.RTM(appId, uid, rtmConfig);
 
-    await rtmClient.login();
-    logger.info(`Logged in as ${userId}`);
+    await client.login();
+    logger.info(`[${channel}] Logged in as ${uid}`);
 
-    if (channel) {
-      await rtmClient.subscribe(channel);
-      subscribedChannels.add(channel);
-      defaultChannel = channel;
-      logger.info(`Subscribed to channel: ${channel}`);
-    }
+    await client.subscribe(channel);
+    logger.info(`[${channel}] Subscribed`);
 
-    setupEventListeners(appId, userId);
+    const session = {
+      client,
+      appId,
+      uid,
+      token,
+      channel,
+      reconnectAttempts: 0,
+      initParams: { appId, uid, token, channel },
+    };
 
-    reconnectAttempts = 0;
-    return rtmClient;
+    setupEventListeners(session);
+    sessions.set(channel, session);
+
+    return client;
   } catch (error) {
-    logger.error('Failed to initialize RTM:', error);
-    rtmClient = null;
+    logger.error(`[${channel}] Failed to initialize RTM:`, error);
     return null;
   }
 }
 
-function setupEventListeners(appId, userId) {
-  if (!rtmClient) return;
+function setupEventListeners(session) {
+  const { client, channel } = session;
 
-  rtmClient.addEventListener('message', (event) => {
+  client.addEventListener('message', (event) => {
     try {
       for (const handler of messageHandlers) {
         try {
           handler(event);
         } catch (handlerError) {
-          logger.error('Error in message handler:', handlerError);
+          logger.error(`[${channel}] Error in message handler:`, handlerError);
         }
       }
     } catch (error) {
-      logger.error('Error processing RTM message:', error);
+      logger.error(`[${channel}] Error processing RTM message:`, error);
     }
   });
 
-  rtmClient.addEventListener('status', (event) => {
-    logger.info(`Status: ${event.state}`);
+  client.addEventListener('status', (event) => {
+    logger.info(`[${channel}] Status: ${event.state}`);
 
     if (event.state === 'DISCONNECTED' || event.state === 'FAILED') {
-      scheduleReconnection();
+      scheduleReconnection(channel);
     } else if (event.state === 'CONNECTED') {
-      reconnectAttempts = 0;
+      session.reconnectAttempts = 0;
     }
   });
 
-  rtmClient.addEventListener('error', (error) => {
-    logger.error(`RTM error: ${error.message || error}`, error);
+  client.addEventListener('error', (error) => {
+    logger.error(`[${channel}] RTM error: ${error.message || error}`, error);
   });
 }
 
-function scheduleReconnection() {
-  reconnectAttempts++;
+function scheduleReconnection(channel) {
+  const session = sessions.get(channel);
+  if (!session) return;
 
-  if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
-    logger.error(`Max reconnection attempts (${MAX_RECONNECT_ATTEMPTS}) reached`);
+  session.reconnectAttempts++;
+
+  if (session.reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+    logger.error(`[${channel}] Max reconnection attempts (${MAX_RECONNECT_ATTEMPTS}) reached`);
+    sessions.delete(channel);
     return;
   }
 
   const delay = Math.min(
-    BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts - 1),
+    BASE_RECONNECT_DELAY * Math.pow(2, session.reconnectAttempts - 1),
     MAX_RECONNECT_DELAY
   );
 
   logger.info(
-    `Scheduling reconnection attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} in ${delay}ms`
+    `[${channel}] Scheduling reconnection attempt ${session.reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} in ${delay}ms`
   );
 
   setTimeout(async () => {
     try {
+      // Clean up old client
       try {
-        if (rtmClient) await rtmClient.logout();
+        if (session.client) await session.client.logout();
       } catch (e) {
         // ignore
       }
-      rtmClient = null;
-      subscribedChannels.clear();
+      sessions.delete(channel);
 
-      if (lastInitParams) {
-        const result = await _initWithParams(
-          lastInitParams.appId,
-          lastInitParams.userId,
-          lastInitParams.token,
-          lastInitParams.channel
-        );
-        if (result) {
-          logger.info('Reconnected successfully');
-        } else {
-          scheduleReconnection();
-        }
+      // Reconnect with saved params
+      const { appId, uid, token } = session.initParams;
+      const result = await initRTMWithParams(appId, uid, token, channel);
+      if (result) {
+        logger.info(`[${channel}] Reconnected successfully`);
+      } else {
+        scheduleReconnection(channel);
       }
     } catch (error) {
-      logger.error('Reconnection failed:', error);
-      scheduleReconnection();
+      logger.error(`[${channel}] Reconnection failed:`, error);
+      scheduleReconnection(channel);
     }
   }, delay);
 }
@@ -185,47 +170,61 @@ function scheduleReconnection() {
  * Send a message to an RTM channel.
  */
 async function sendRTMMessage(channel, message) {
-  if (!rtmClient) {
-    logger.warn('RTM client not initialized — cannot send message');
+  const session = sessions.get(channel);
+  if (!session) {
+    logger.warn(`[${channel}] No RTM session — cannot send message`);
     return false;
-  }
-
-  const targetChannel = channel || defaultChannel;
-  if (!targetChannel) {
-    logger.warn('No channel specified for RTM message');
-    return false;
-  }
-
-  // Auto-subscribe if not yet subscribed
-  if (!subscribedChannels.has(targetChannel)) {
-    try {
-      await rtmClient.subscribe(targetChannel);
-      subscribedChannels.add(targetChannel);
-      logger.info(`Auto-subscribed to channel: ${targetChannel}`);
-    } catch (e) {
-      logger.error(`Failed to subscribe to ${targetChannel}:`, e);
-    }
   }
 
   try {
-    await rtmClient.publish(targetChannel, message);
-    logger.debug(`Message sent to ${targetChannel}`);
+    await session.client.publish(channel, message);
+    logger.debug(`[${channel}] Message sent`);
     return true;
   } catch (error) {
-    logger.error('Failed to send RTM message:', error);
+    logger.error(`[${channel}] Failed to send RTM message:`, error);
     return false;
   }
 }
 
 /**
- * Check if RTM is connected.
+ * Destroy the RTM session for a channel (called on unregister-agent).
  */
-function isConnected() {
-  return rtmClient !== null;
+async function destroySession(channel) {
+  const session = sessions.get(channel);
+  if (!session) return;
+
+  // Remove from map first to prevent further use
+  sessions.delete(channel);
+
+  try {
+    await session.client.unsubscribe(channel).catch((e) => {
+      logger.warn(`[${channel}] Unsubscribe error (ignored): ${e.message || e}`);
+    });
+    await session.client.logout().catch((e) => {
+      logger.warn(`[${channel}] Logout error (ignored): ${e.message || e}`);
+    });
+    logger.info(`[${channel}] Session destroyed`);
+  } catch (error) {
+    logger.error(`[${channel}] Error destroying session:`, error);
+  }
 }
 
 /**
- * Register a handler for incoming RTM messages.
+ * Check if RTM is connected for any channel (backwards-compatible).
+ */
+function isConnected() {
+  return sessions.size > 0;
+}
+
+/**
+ * Check if RTM is connected for a specific channel.
+ */
+function isChannelConnected(channel) {
+  return sessions.has(channel);
+}
+
+/**
+ * Register a handler for incoming RTM messages (from all sessions).
  */
 function onRTMMessage(callback) {
   messageHandlers.push(callback);
@@ -235,6 +234,8 @@ module.exports = {
   initRTM,
   initRTMWithParams,
   sendRTMMessage,
+  destroySession,
   onRTMMessage,
   isConnected,
+  isChannelConnected,
 };
