@@ -130,17 +130,19 @@ app.get('/', (req, res) => {
 // ─── Agent Registration Endpoint ───
 // Called by simple-backend after successful join to map appId+channel → agentId
 app.post('/register-agent', (req, res) => {
-  const { app_id, channel, agent_id, auth_header, agent_endpoint, prompt } = req.body;
+  const { app_id, channel, agent_id, auth_header, agent_endpoint, prompt,
+          user_uid, subscriber_token, rtm_token, rtm_uid, thymia_api_key } = req.body;
   if (!app_id || !channel || !agent_id) {
     logger.error('[RegisterAgent] missing required fields: app_id, channel, agent_id');
     return res.status(400).json({ error: 'Missing app_id, channel, or agent_id' });
   }
   registerAgent(app_id, channel, agent_id, auth_header, agent_endpoint);
-  logger.info(`[RegisterAgent] prompt_len=${(prompt || '').length}`);
-  // Notify modules about the agent registration
+  logger.info(`[RegisterAgent] prompt_len=${(prompt || '').length} has_tokens=${!!subscriber_token}`);
+  // Notify modules about the agent registration (include early-start params)
+  const earlyParams = { user_uid, subscriber_token, rtm_token, rtm_uid, thymia_api_key };
   for (const mod of modules) {
     if (mod.onAgentRegistered) {
-      mod.onAgentRegistered(app_id, channel, agent_id, auth_header, agent_endpoint, prompt);
+      mod.onAgentRegistered(app_id, channel, agent_id, auth_header, agent_endpoint, prompt, earlyParams);
     }
   }
   res.json({ success: true, key: `${app_id}:${channel}`, agent_id });
@@ -855,6 +857,8 @@ async function initRTM() {
     const rtm = require('./rtm_client');
     // Register message handler for all sessions (current and future)
     rtm.onRTMMessage(handleRTMMessage);
+    // Register presence handler — detect agent leaving channel for cleanup
+    rtm.onPresence(handleRTMPresence);
     // Try env-var-based init (legacy)
     await rtm.initRTM();
     logger.info('RTM integration enabled');
@@ -862,6 +866,67 @@ async function initRTM() {
     // rtm_client.js or rtm-nodejs not available — skip silently
     logger.debug('RTM not available (optional): ' + e.message);
   }
+}
+
+/**
+ * Handle RTM presence events. When the agent RTM UID (100-{channel}) leaves,
+ * trigger full cleanup (Thymia disconnect, RTM destroy, audio subscriber stop).
+ * This is the server-side equivalent of /unregister-agent without relying on
+ * the client to call hangup.
+ */
+function handleRTMPresence(channel, event) {
+  const type = event.eventType || event.type || '';
+  const publisher = event.publisher || event.userId || '';
+
+  // Only care about leave/timeout events
+  if (type !== 'REMOTE_LEAVE' && type !== 'REMOTE_TIMEOUT') return;
+
+  // Check if the publisher is the client RTM UID (format: "101-{channel}")
+  // or the agent RTM UID (format: "100-{channel}")
+  // The client leaves first on hangup; the agent may never send REMOTE_LEAVE.
+  const isClient = publisher.startsWith('101-');
+  const isAgent = publisher.startsWith('100-');
+  if (!isClient && !isAgent) return;
+
+  const role = isClient ? 'Client' : 'Agent';
+  logger.info(`[Presence] ${role} RTM UID ${publisher} left channel ${channel} (${type}) — triggering cleanup`);
+
+  // Find the appId for this channel from the agent registry
+  let appId = null;
+  for (const [key, entry] of agentRegistry.entries()) {
+    if (key.endsWith(`:${channel}`)) {
+      appId = key.split(':')[0];
+      break;
+    }
+  }
+
+  if (!appId) {
+    logger.warn(`[Presence] No agent registry entry for channel ${channel} — skipping cleanup`);
+    return;
+  }
+
+  // Trigger the same cleanup as /unregister-agent
+  const entry = unregisterAgent(appId, channel);
+  if (!entry) return;
+
+  audioSubscriber.stopSession(appId, channel);
+
+  // Destroy RTM session (async, fire-and-forget)
+  try {
+    const rtm = require('./rtm_client');
+    rtm.destroySession(channel).catch((e) => {
+      logger.error(`[Presence] RTM destroy error: ${e.message}`);
+    });
+  } catch (e) { /* rtm not available */ }
+
+  // Notify modules (Thymia disconnect, Shen cleanup, etc.)
+  for (const mod of modules) {
+    if (mod.onAgentUnregistered) {
+      mod.onAgentUnregistered(appId, channel, entry.agentId);
+    }
+  }
+
+  logger.info(`[Presence] Cleanup complete for ${appId}:${channel} (agent=${entry.agentId})`);
 }
 
 async function handleRTMMessage(event) {

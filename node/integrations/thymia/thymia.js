@@ -579,12 +579,33 @@ module.exports = {
    * Called when simple-backend registers an agent_id for an appId+channel.
    * Stores the mapping so we can call Agent Update API when biomarkers arrive.
    */
-  onAgentRegistered(appId, channel, agentId, authHeader, agentEndpoint, prompt) {
+  onAgentRegistered(appId, channel, agentId, authHeader, agentEndpoint, prompt, earlyParams) {
     const key = getKey(appId, channel);
     agentMap.set(key, { agentId, authHeader, agentEndpoint, originalPrompt: prompt || null });
     // Register with shared updater (idempotent — Shen may also register)
     agentUpdater.registerAgent(appId, channel, agentId, authHeader, agentEndpoint, prompt);
     logger.info(`[AgentRegistered] ${key} → agent=${agentId} prompt_len=${(prompt || '').length}`);
+
+    // Early-start audio subscriber + Thymia if tokens were provided at registration
+    const ep = earlyParams || {};
+    if (ep.subscriber_token && ep.user_uid) {
+      if (_audioSubscriber && !_audioSubscriber.hasSession(appId, channel)) {
+        _audioSubscriber.startSession(appId, channel, ep.user_uid, ep.subscriber_token);
+        logger.info(`[AgentRegistered] Early-started audio subscriber for ${key}`);
+      }
+      const apiKey = ep.thymia_api_key || process.env.THYMIA_API_KEY || '';
+      if (apiKey) {
+        connectThymia(appId, channel, {
+          user_label: `user-${ep.user_uid}-${channel}`,
+          date_of_birth: '1990-01-01',
+          birth_sex: 'MALE',
+          biomarkers: ['helios', 'apollo'],
+          policies: ['passthrough', 'agora_safety_analysis'],
+          apiKey,
+        });
+        logger.info(`[AgentRegistered] Early-started Thymia for ${key}`);
+      }
+    }
   },
 
   /**
