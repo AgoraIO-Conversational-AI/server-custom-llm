@@ -630,7 +630,7 @@ module.exports = {
           date_of_birth: '1990-01-01',
           birth_sex: 'MALE',
           biomarkers: ['helios', 'apollo'],
-          policies: ['passthrough', 'safety_analysis'],
+          policies: ['passthrough', 'agora_safety_analysis'],
           apiKey,
         });
       }

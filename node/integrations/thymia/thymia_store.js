@@ -63,7 +63,7 @@ function getOrCreate(appId, channel) {
  *
  * Actual Thymia response format:
  * - Passthrough: { type:"POLICY_RESULT", policy:"passthrough", result:{ biomarkers:{ stress:0.72, ... } } }
- * - Safety:      { type:"POLICY_RESULT", policy:"safety_analysis", result:{ level:1, alert:"monitor", concerns:[...], recommended_actions:[...] } }
+ * - Safety:      { type:"POLICY_RESULT", policy:"safety_analysis", policy_name:"agora_safety_analysis", result:{ level:1, alert:"monitor", concerns:[...], recommended_actions:[...] } }
  */
 function updateFromPolicyResult(appId, channel, result) {
   const data = getOrCreate(appId, channel);
@@ -94,7 +94,9 @@ function updateFromPolicyResult(appId, channel, result) {
   }
 
   // Safety analysis — also extract biomarkers if present
-  if (result.policy === 'safety_analysis') {
+  // API returns policy:"safety_analysis" + policy_name:"agora_safety_analysis"
+  const isSafety = result.policy_name === 'agora_safety_analysis' || result.policy === 'safety_analysis';
+  if (isSafety) {
     const safeBio = inner.biomarkers || inner.biomarker_summary;
     if (safeBio) {
       for (const [name, value] of Object.entries(safeBio)) {
@@ -109,7 +111,7 @@ function updateFromPolicyResult(appId, channel, result) {
       if (safeBio.low_self_esteem !== undefined) data.wellness.low_self_esteem = safeBio.low_self_esteem;
     }
   }
-  if (result.policy === 'safety_analysis') {
+  if (isSafety) {
     data.safety.level = inner.level !== undefined ? inner.level : data.safety.level;
     data.safety.alert = inner.alert || false;
     data.safety.concerns = inner.concerns || [];

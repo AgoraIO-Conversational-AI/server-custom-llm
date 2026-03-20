@@ -75,7 +75,7 @@ class ThymiaClient {
       birth_sex: birthSex,
       language: config.language || 'en',
       biomarkers: config.biomarkers || (process.env.THYMIA_BIOMARKERS || 'helios,apollo').split(','),
-      policies: config.policies || (process.env.THYMIA_POLICIES || 'passthrough,safety_analysis').split(','),
+      policies: config.policies || (process.env.THYMIA_POLICIES || 'passthrough,agora_safety_analysis').split(','),
       sample_rate: config.sample_rate || 16000,
       format: config.format || 'pcm16',
       channels: config.channels || 1,
