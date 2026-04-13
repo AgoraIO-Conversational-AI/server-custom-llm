@@ -21,6 +21,7 @@ const fs = require('fs');
 const path = require('path');
 const OpenAI = require('openai');
 const { getMessages } = require('./conversation_store');
+const dashboardClient = require('./consultant_dashboard_client');
 
 // Conditionally import biomarker stores (may not be present in all deployments)
 let thymiaStore = null;
@@ -176,6 +177,7 @@ function saveSessionSummary(userIdHash, sessionData) {
   const voiceCount = Object.values(sessionData.biomarkers?.voice || {}).reduce((n, v) => n + (v.count || 0), 0);
   const vitalsCount = Object.values(sessionData.biomarkers?.vitals || {}).reduce((n, v) => n + (v.count || 0), 0);
   logger.info(`Saved session summary for user ${userIdHash.substring(0, 8)}... (${sessionData.summary.length} chars) with ${voiceCount} voice samples, ${vitalsCount} vitals samples`);
+  return `users/${userIdHash}/sessions/${filename}`;
 }
 
 // ─── Injection builder ───
@@ -262,27 +264,44 @@ module.exports = {
 
   onAgentRegistered(appId, channel, agentId, authHeader, agentEndpoint, prompt, earlyParams) {
     const userId = earlyParams?.user_id;
-    if (!ENCRYPTION_KEY || !userId || userId === 'anonymous') {
-      logger.debug(`Memory skipped for channel=${channel} (encryption=${!!ENCRYPTION_KEY} user_id=${userId || 'none'})`);
+    const shouldPersistMemory = !!(ENCRYPTION_KEY && userId && userId !== 'anonymous');
+    const dashboard = dashboardClient.createDashboardConfig(earlyParams);
+    const shouldPostDashboard = !!dashboard;
+
+    if (!shouldPersistMemory && !shouldPostDashboard) {
+      logger.debug(`Memory/dashboard skipped for channel=${channel} (memory=${shouldPersistMemory} dashboard=${shouldPostDashboard})`);
       return;
     }
 
-    logger.info(`Registering memory for channel=${channel} user_id=${userId} appId=${appId}`);
-
-    // Load session history
-    const dir = getSessionsDir(userId);
-    const summaries = loadSessionSummaries(userId);
-    if (summaries.length === 0) {
-      logger.info(`No previous sessions for user_id=${userId} (dir=${dir})`);
-      channelState.set(channel, { userId, appId, injection: null, biomarkers: { voice: {}, vitals: {} } });
-      return;
+    let injection = null;
+    if (shouldPersistMemory) {
+      logger.info(`Registering memory for channel=${channel} user_id=${userId} appId=${appId}`);
+      const dir = getSessionsDir(userId);
+      const summaries = loadSessionSummaries(userId);
+      if (summaries.length === 0) {
+        logger.info(`No previous sessions for user_id=${userId} (dir=${dir})`);
+      } else {
+        injection = buildInjection(summaries);
+        logger.info(`Loaded ${summaries.length} session(s) for user_id=${userId} (${injection.length} chars)`);
+      }
     }
 
-    // Build injection text with biomarker history
-    const injection = buildInjection(summaries);
+    if (shouldPostDashboard) {
+      logger.info(`Dashboard posting enabled for channel=${channel} client_id=${dashboard.clientId}`);
+    }
 
-    channelState.set(channel, { userId, appId, injection, biomarkers: { voice: {}, vitals: {} } });
-    logger.info(`Loaded ${summaries.length} session(s) for user_id=${userId} (${injection.length} chars)`);
+    channelState.set(channel, {
+      userId,
+      appId,
+      channel,
+      injection,
+      biomarkers: { voice: {}, vitals: {} },
+      startedAt: new Date().toISOString(),
+      startedAtMs: Date.now(),
+      sessionId: crypto.randomUUID(),
+      shouldPersistMemory,
+      dashboard,
+    });
   },
 
   getSystemInjection(appId, channel) {
@@ -362,13 +381,16 @@ module.exports = {
     const state = channelState.get(channel);
     channelState.delete(channel);
 
-    if (!ENCRYPTION_KEY || !state?.userId || state.userId === 'anonymous') {
-      logger.info(`Memory save skipped: encryption=${!!ENCRYPTION_KEY} user_id=${state?.userId || 'none'}`);
+    const shouldPersistMemory = !!(state?.shouldPersistMemory && ENCRYPTION_KEY && state?.userId && state.userId !== 'anonymous');
+    const shouldPostDashboard = !!state?.dashboard;
+
+    if (!shouldPersistMemory && !shouldPostDashboard) {
+      logger.info(`Memory/dashboard save skipped: user_id=${state?.userId || 'none'} dashboard=${shouldPostDashboard}`);
       return;
     }
 
     const userId = state.userId;
-    logger.info(`Summarizing session for user_id=${userId} on channel=${channel}`);
+    logger.info(`Summarizing session for user_id=${userId || 'none'} on channel=${channel}`);
 
     // Get conversation from store
     // The conversation_store keys by appId:userId:channel
@@ -402,11 +424,21 @@ module.exports = {
       vitals: finalizeBiomarkers(state.biomarkers?.vitals || {}),
     };
 
-    // Encrypt and save
-    try {
-      saveSessionSummary(userId, { summary, biomarkers });
-    } catch (err) {
-      logger.error(`Failed to save session summary: ${err.message}`);
+    let memoryStorageKey = '';
+    if (shouldPersistMemory) {
+      try {
+        memoryStorageKey = saveSessionSummary(userId, { summary, biomarkers });
+      } catch (err) {
+        logger.error(`Failed to save session summary: ${err.message}`);
+      }
+    }
+
+    if (shouldPostDashboard) {
+      try {
+        await dashboardClient.postSessionComplete(state, summary, biomarkers, memoryStorageKey, logger);
+      } catch (err) {
+        logger.error(`Failed to post session-complete to dashboard: ${err.message}`);
+      }
     }
   },
 

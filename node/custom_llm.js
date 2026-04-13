@@ -187,7 +187,10 @@ app.get('/', (req, res) => {
 app.post('/register-agent', (req, res) => {
   const { app_id, channel, agent_id, auth_header, agent_endpoint, prompt,
           user_uid, subscriber_token, rtm_token, rtm_uid, thymia_api_key,
-          user_id, user_name, max_session_duration } = req.body;
+          user_id, user_name, max_session_duration,
+          client_id, consultant_id, consultant_name,
+          consultant_dashboard_url, consultant_dashboard_shared_secret,
+          profile_name } = req.body;
   if (!app_id || !channel || !agent_id) {
     logger.error('[RegisterAgent] missing required fields: app_id, channel, agent_id');
     return res.status(400).json({ error: 'Missing app_id, channel, or agent_id' });
@@ -195,7 +198,13 @@ app.post('/register-agent', (req, res) => {
   registerAgent(app_id, channel, agent_id, auth_header, agent_endpoint, max_session_duration);
   logger.info(`[RegisterAgent] prompt_len=${(prompt || '').length} has_tokens=${!!subscriber_token} user_id=${user_id || 'none'}`);
   // Notify modules about the agent registration (include early-start params)
-  const earlyParams = { user_uid, subscriber_token, rtm_token, rtm_uid, thymia_api_key, user_id, user_name, max_session_duration };
+  const earlyParams = {
+    user_uid, subscriber_token, rtm_token, rtm_uid, thymia_api_key,
+    user_id, user_name, max_session_duration,
+    client_id, consultant_id, consultant_name,
+    consultant_dashboard_url, consultant_dashboard_shared_secret,
+    profile_name,
+  };
   for (const mod of modules) {
     if (mod.onAgentRegistered) {
       mod.onAgentRegistered(app_id, channel, agent_id, auth_header, agent_endpoint, prompt, earlyParams);
