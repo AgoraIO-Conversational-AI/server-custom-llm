@@ -69,6 +69,13 @@ if (SHEN_ENABLED) {
   modules.push(shenModule);
 }
 
+const MEMORY_ENABLED = process.env.ENABLE_MEMORY === 'true';
+if (MEMORY_ENABLED) {
+  const memoryModule = require('./memory_store');
+  memoryModule.init(audioSubscriber, { rtmClient: () => rtmClient });
+  modules.push(memoryModule);
+}
+
 // Initialize Express app
 const app = express();
 const port = process.env.PORT || 8101;
@@ -78,6 +85,7 @@ const logger = {
   info: (message) => console.log(`INFO: ${message}`),
   debug: (message) => console.log(`DEBUG: ${message}`),
   error: (message, error) => console.error(`ERROR: ${message}`, error),
+  warn: (message) => console.warn(`WARN: ${message}`),
 };
 
 // Middleware
@@ -93,10 +101,10 @@ app.get('/ping', (req, res) => {
 // ─── Agent Registry (appId:channel → agentId + auth) ───
 const agentRegistry = new Map();
 
-function registerAgent(appId, channel, agentId, authHeader, agentEndpoint) {
+function registerAgent(appId, channel, agentId, authHeader, agentEndpoint, maxSessionDuration) {
   const key = `${appId}:${channel}`;
-  agentRegistry.set(key, { agentId, authHeader, agentEndpoint, registeredAt: Date.now() });
-  logger.info(`[AgentRegistry] registered ${key} → agent=${agentId}`);
+  agentRegistry.set(key, { agentId, authHeader, agentEndpoint, registeredAt: Date.now(), maxSessionDuration: maxSessionDuration || 0, wrapUpSent: false });
+  logger.info(`[AgentRegistry] registered ${key} → agent=${agentId} maxDuration=${maxSessionDuration || 'none'}`);
 }
 
 function unregisterAgent(appId, channel) {
@@ -112,6 +120,53 @@ function unregisterAgent(appId, channel) {
 function getAgent(appId, channel) {
   return agentRegistry.get(`${appId}:${channel}`) || null;
 }
+
+// ─── Stale Session Cleanup ───
+// Safety net: if neither /unregister-agent nor RTM presence fires (e.g. server
+// lost RTM connection, client crashed, Agora idle-timeout killed the agent),
+// clean up sessions that haven't received a request in STALE_SESSION_TIMEOUT.
+const STALE_SESSION_TIMEOUT = 10 * 60 * 1000; // 10 minutes with no LLM requests
+const STALE_CHECK_INTERVAL = 60 * 1000; // check every minute
+
+// Track last request time per channel
+const lastRequestTime = new Map();
+
+function markChannelActive(appId, channel) {
+  lastRequestTime.set(`${appId}:${channel}`, Date.now());
+}
+
+const staleTimer = setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of agentRegistry.entries()) {
+    const lastActive = lastRequestTime.get(key) || entry.registeredAt;
+    const idleMs = now - lastActive;
+    if (idleMs > STALE_SESSION_TIMEOUT) {
+      const [appId, channel] = key.split(':');
+      logger.info(`[StaleCleanup] Session ${key} idle for ${Math.round(idleMs / 1000)}s — triggering cleanup`);
+
+      const removed = unregisterAgent(appId, channel);
+      if (!removed) continue;
+
+      audioSubscriber.stopSession(appId, channel);
+
+      try {
+        const rtm = require('./rtm_client');
+        rtm.destroySession(channel).catch(() => {});
+      } catch (e) { /* rtm not available */ }
+
+      for (const mod of modules) {
+        if (mod.onAgentUnregistered) {
+          mod.onAgentUnregistered(appId, channel, removed.agentId);
+        }
+      }
+
+      lastRequestTime.delete(key);
+      logger.info(`[StaleCleanup] Cleanup complete for ${key} (agent=${removed.agentId})`);
+    }
+  }
+}, STALE_CHECK_INTERVAL);
+
+if (staleTimer.unref) staleTimer.unref();
 
 // Root endpoint
 app.get('/', (req, res) => {
@@ -131,15 +186,16 @@ app.get('/', (req, res) => {
 // Called by simple-backend after successful join to map appId+channel → agentId
 app.post('/register-agent', (req, res) => {
   const { app_id, channel, agent_id, auth_header, agent_endpoint, prompt,
-          user_uid, subscriber_token, rtm_token, rtm_uid, thymia_api_key } = req.body;
+          user_uid, subscriber_token, rtm_token, rtm_uid, thymia_api_key,
+          user_id, user_name, max_session_duration } = req.body;
   if (!app_id || !channel || !agent_id) {
     logger.error('[RegisterAgent] missing required fields: app_id, channel, agent_id');
     return res.status(400).json({ error: 'Missing app_id, channel, or agent_id' });
   }
-  registerAgent(app_id, channel, agent_id, auth_header, agent_endpoint);
-  logger.info(`[RegisterAgent] prompt_len=${(prompt || '').length} has_tokens=${!!subscriber_token}`);
+  registerAgent(app_id, channel, agent_id, auth_header, agent_endpoint, max_session_duration);
+  logger.info(`[RegisterAgent] prompt_len=${(prompt || '').length} has_tokens=${!!subscriber_token} user_id=${user_id || 'none'}`);
   // Notify modules about the agent registration (include early-start params)
-  const earlyParams = { user_uid, subscriber_token, rtm_token, rtm_uid, thymia_api_key };
+  const earlyParams = { user_uid, subscriber_token, rtm_token, rtm_uid, thymia_api_key, user_id, user_name, max_session_duration };
   for (const mod of modules) {
     if (mod.onAgentRegistered) {
       mod.onAgentRegistered(app_id, channel, agent_id, auth_header, agent_endpoint, prompt, earlyParams);
@@ -201,10 +257,12 @@ function extractContext(body) {
   const subscriberToken = body.subscriber_token || '';
   const rtmToken = body.rtm_token || '';
   const rtmUid = body.rtm_uid || '';
+  const authenticatedUserId = body.user_id || '';
+  const authenticatedUserName = body.user_name || '';
 
   const thymiaApiKey = body.thymia_api_key || '';
 
-  return { appId, userId, channel: channel || 'default', agentUid, subscriberToken, rtmToken, rtmUid, thymiaApiKey };
+  return { appId, userId, channel: channel || 'default', agentUid, subscriberToken, rtmToken, rtmUid, thymiaApiKey, authenticatedUserId, authenticatedUserName };
 }
 
 /**
@@ -345,10 +403,62 @@ app.post('/chat/completions', async (req, res) => {
         .json({ detail: 'Missing messages in request body' });
     }
 
-    const { appId, userId, channel, agentUid, subscriberToken, rtmToken, rtmUid, thymiaApiKey } = extractContext(req.body);
+    const { appId, userId, channel, agentUid, subscriberToken, rtmToken, rtmUid, thymiaApiKey, authenticatedUserId, authenticatedUserName } = extractContext(req.body);
     const client = getOpenAIClient(req);
 
-    logger.info(`Context: appId=${appId}, userId=${userId}, channel=${channel}, model=${model} thymia_key_in_params=${thymiaApiKey ? 'yes' : 'no'}`);
+    logger.info(`Context: appId=${appId}, userId=${userId}, channel=${channel}, model=${model} thymia_key_in_params=${thymiaApiKey ? 'yes' : 'no'} auth_user=${authenticatedUserId || 'none'}`);
+
+    // Mark channel active for stale session cleanup
+    if (appId && channel) markChannelActive(appId, channel);
+
+    // ─── Session duration limiting ───
+    const agentEntry = getAgent(appId, channel);
+    if (agentEntry && agentEntry.maxSessionDuration > 0) {
+      const elapsed = (Date.now() - agentEntry.registeredAt) / 1000;
+      const remaining = agentEntry.maxSessionDuration - elapsed;
+
+      if (remaining <= 0) {
+        // Session expired — return closing message and trigger hangup
+        logger.info(`[SessionLimit] Time expired for ${appId}:${channel} (elapsed=${Math.round(elapsed)}s)`);
+        const closingMsg = "Our session time is up for today. Thank you for sharing, and I look forward to our next conversation. Take care of yourself.";
+
+        if (stream) {
+          res.setHeader('Content-Type', 'text/event-stream');
+          res.setHeader('Cache-Control', 'no-cache');
+          res.setHeader('Connection', 'keep-alive');
+          const chunk = { id: `session_limit_${Date.now()}`, choices: [{ index: 0, delta: { role: 'assistant', content: closingMsg }, finish_reason: 'stop' }] };
+          res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+          res.write('data: [DONE]\n\n');
+          res.end();
+        } else {
+          return res.json({ choices: [{ message: { role: 'assistant', content: closingMsg }, finish_reason: 'stop' }] });
+        }
+
+        // Trigger hangup via Agora API (fire-and-forget)
+        if (agentEntry.authHeader && agentEntry.agentEndpoint) {
+          const https = require('https');
+          const hangupUrl = `${agentEntry.agentEndpoint}/${appId}/agents/${agentEntry.agentId}/leave`;
+          try {
+            const urlObj = new URL(hangupUrl);
+            const hangupReq = https.request(urlObj, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': agentEntry.authHeader }, timeout: 5000 });
+            hangupReq.on('error', (e) => logger.error(`[SessionLimit] Hangup failed: ${e.message}`));
+            hangupReq.end();
+          } catch (e) { logger.error(`[SessionLimit] Hangup error: ${e.message}`); }
+        }
+        return;
+      }
+
+      // Inject wrap-up prompt 5 minutes before limit
+      if (remaining <= 300 && !agentEntry.wrapUpSent) {
+        agentEntry.wrapUpSent = true;
+        const mins = Math.round(remaining / 60);
+        const wrapUpMsg = `[Session time notice: approximately ${mins} minute${mins !== 1 ? 's' : ''} remaining. Please begin wrapping up the session naturally.]`;
+        if (Array.isArray(requestMessages)) {
+          requestMessages.unshift({ role: 'system', content: wrapUpMsg });
+        }
+        logger.info(`[SessionLimit] Wrap-up injected for ${appId}:${channel} (${mins} min remaining)`);
+      }
+    }
 
     // Initialize RTM session for this channel (idempotent — creates once per channel)
     if (appId && channel && channel !== 'default' && rtmUid) {
@@ -359,7 +469,7 @@ app.post('/chat/completions', async (req, res) => {
     }
 
     // Module onRequest hooks (auto-start audio, connect services, forward transcripts)
-    const moduleCtx = { appId, userId, channel, agentUid, subscriberToken, thymiaApiKey, messages: requestMessages, req };
+    const moduleCtx = { appId, userId, channel, agentUid, subscriberToken, thymiaApiKey, authenticatedUserName, messages: requestMessages, req };
     for (const mod of modules) {
       if (mod.onRequest) mod.onRequest(moduleCtx);
     }
@@ -877,6 +987,8 @@ async function initRTM() {
 function handleRTMPresence(channel, event) {
   const type = event.eventType || event.type || '';
   const publisher = event.publisher || event.userId || '';
+
+  logger.info(`[Presence] channel=${channel} type=${type} publisher=${publisher}`);
 
   // Only care about leave/timeout events
   if (type !== 'REMOTE_LEAVE' && type !== 'REMOTE_TIMEOUT') return;

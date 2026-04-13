@@ -18,6 +18,7 @@ const logger = {
 // Per-channel sessions: Map<channel, { client, appId, uid, token, reconnectAttempts, initParams }>
 const sessions = new Map();
 let messageHandlers = [];
+let presenceHandlers = [];
 const MAX_RECONNECT_ATTEMPTS = 10;
 const BASE_RECONNECT_DELAY = 2000;
 const MAX_RECONNECT_DELAY = 60000;
@@ -65,8 +66,8 @@ async function initRTMWithParams(appId, uid, token, channel) {
     await client.login();
     logger.info(`[${channel}] Logged in as ${uid}`);
 
-    await client.subscribe(channel);
-    logger.info(`[${channel}] Subscribed`);
+    await client.subscribe(channel, { withPresence: true });
+    logger.info(`[${channel}] Subscribed (with presence)`);
 
     const session = {
       client,
@@ -102,6 +103,17 @@ function setupEventListeners(session) {
       }
     } catch (error) {
       logger.error(`[${channel}] Error processing RTM message:`, error);
+    }
+  });
+
+  client.addEventListener('presence', (event) => {
+    logger.info(`[${channel}] Presence: type=${event.eventType} publisher=${event.publisher || 'unknown'}`);
+    for (const handler of presenceHandlers) {
+      try {
+        handler(channel, event);
+      } catch (handlerError) {
+        logger.error(`[${channel}] Error in presence handler:`, handlerError);
+      }
     }
   });
 
@@ -230,12 +242,21 @@ function onRTMMessage(callback) {
   messageHandlers.push(callback);
 }
 
+/**
+ * Register a handler for RTM presence events (join/leave/timeout).
+ * Handler signature: (channel, event) => void
+ */
+function onPresence(callback) {
+  presenceHandlers.push(callback);
+}
+
 module.exports = {
   initRTM,
   initRTMWithParams,
   sendRTMMessage,
   destroySession,
   onRTMMessage,
+  onPresence,
   isConnected,
   isChannelConnected,
 };

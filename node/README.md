@@ -53,6 +53,24 @@ RTM can also initialize dynamically from request parameters — see [RTM Integra
 
 See [integrations/thymia/README.md](integrations/thymia/README.md) for full Thymia details.
 
+**Shen (optional):**
+
+| Variable       | Description                          | Default |
+| -------------- | ------------------------------------ | ------- |
+| `SHEN_ENABLED` | Enable Shen camera vitals module     | `false` |
+
+Shen runs client-side (browser WASM SDK). The server receives vitals via RTM — no Shen API key needed server-side. See `recipes/shen.md` in agent-samples for full setup.
+
+**Memory (optional):**
+
+| Variable               | Description                              | Default  |
+| ---------------------- | ---------------------------------------- | -------- |
+| `ENCRYPTION_KEY`       | AES-256 master key (64 hex chars)        | _(none — memory disabled)_ |
+| `DATA_DIR`             | Directory for encrypted session files    | `./data` |
+| `MAX_HISTORY_SESSIONS` | Max previous sessions to load on connect | `5`      |
+
+Requires auth on the backend (provides `user_id` via JWT). See [Session Memory](#session-memory) below.
+
 ### Run
 
 ```bash
@@ -88,6 +106,7 @@ node/
   custom_llm.js           # Main server: endpoints, streaming, tool execution, module system
   tools.js                # Tool definitions, RAG data, tool implementations
   conversation_store.js   # In-memory conversation store with trimming
+  memory_store.js         # Encrypted session memory with biomarker averages
   rtm_client.js           # RTM integration (optional, requires rtm-nodejs)
   audio_subscriber.js     # RTC audio capture wrapper (Go child process)
   integrations/
@@ -96,6 +115,11 @@ node/
       thymia_client.js    # Thymia Sentinel WebSocket client
       thymia_store.js     # In-memory biomarker results store
       README.md           # Setup and configuration guide
+    shen/
+      shen.js             # Module plugin (RTM listener + Agent Update API)
+      shen_store.js       # In-memory camera vitals store
+  data/                   # Encrypted session files (created at runtime, gitignored)
+    users/{hash}/sessions/*.enc
   package.json
 ```
 
@@ -215,6 +239,94 @@ Full details: **[go-audio-subscriber/README.md](../go-audio-subscriber/README.md
 Real-time voice biomarker analysis — emotions, wellness (stress, burnout, fatigue), and clinical markers from the user's voice. Captures RTC audio via the audio subscriber, streams it to Thymia Sentinel, and pushes results to both the LLM (system message injection) and the client UI (via RTM).
 
 Enable with `THYMIA_ENABLED=true` and `THYMIA_API_KEY`. Full details: **[integrations/thymia/README.md](integrations/thymia/README.md)**.
+
+## Session Memory
+
+Encrypted per-user session history with biomarker averages. When enabled, the memory module:
+
+1. **On connect** — loads previous session summaries from disk, decrypts them, and injects a dated history (with biomarker baselines) into the system prompt
+2. **During session** — accumulates running averages of voice biomarkers (from Thymia) and camera vitals (from Shen) on each LLM request
+3. **On disconnect** — summarizes the conversation via LLM, computes final biomarker averages, encrypts everything, and writes to disk
+
+### Safety Rule
+
+Memory is **only** active when both conditions are met:
+1. `ENCRYPTION_KEY` is set in env
+2. `user_id` from the backend JWT is not `"anonymous"`
+
+If either is false, memory is completely skipped — sessions are ephemeral.
+
+### How It Works
+
+The backend auth system (Google + SMS 2FA) produces a `user_id_hash = sha256(google_sub + '|' + name + '|' + phone)`. This hash flows to the custom LLM via the `register-agent` call and is used as:
+- The disk path for session files (`data/users/{hash}/sessions/`)
+- The HKDF input for per-user encryption key derivation
+
+### Disk Structure
+
+```
+data/users/{user_id_hash}/
+  sessions/
+    2026-03-25T11-30-00-000Z.enc   # encrypted session data
+    2026-03-26T14-22-00-000Z.enc
+```
+
+### Session Data Format
+
+Each `.enc` file contains AES-256-GCM encrypted JSON:
+
+```json
+{
+  "summary": "User discussed work stress and poor sleep...",
+  "biomarkers": {
+    "voice": { "stress": { "avg": 0.45, "count": 12 }, "fatigue": { "avg": 0.52, "count": 12 } },
+    "vitals": { "heart_rate_bpm": { "avg": 82, "count": 8 }, "hrv_sdnn_ms": { "avg": 38, "count": 8 } }
+  },
+  "savedAt": "2026-03-30T12:00:00.000Z"
+}
+```
+
+- `voice` — averages from Thymia (emotions, wellness, clinical scores as 0-1 floats)
+- `vitals` — averages from Shen (HR in bpm, HRV in ms, stress index, breathing rate, BP)
+- `count` — number of samples accumulated (one per LLM request)
+- Old sessions without biomarkers (pre-biomarker format) still load correctly
+
+### Prompt Injection Format
+
+On reconnect, previous sessions are injected into the system prompt:
+
+```
+## Previous Session History (2 sessions)
+
+### 2026-03-25 11-30-00-000 UTC:
+User discussed work stress and poor sleep. Mentioned difficulty concentrating.
+Biomarkers: stress 45%, fatigue 52%, distress 30% | Heart Rate 82 bpm, Hrv Sdnn 38 ms
+
+### 2026-03-26 14-22-00-000 UTC:
+User tried breathing exercises, felt calmer. Sleep improving.
+Biomarkers: stress 38%, fatigue 44% | Heart Rate 76 bpm, Hrv Sdnn 43 ms
+```
+
+The LLM can observe trends across sessions and reference them naturally.
+
+### Summarization
+
+On session end, conversation messages (including `[Voice Biomarker` and `[Camera Vitals` system messages) are sent to the LLM for summarization. The prompt asks the model to note key topics, emotional themes, breakthroughs, and significant biomarker patterns.
+
+### Encryption
+
+- Algorithm: AES-256-GCM
+- Key derivation: HKDF-SHA256 from master key (`ENCRYPTION_KEY`) + user_id_hash + random salt
+- Each file has its own random salt and nonce
+- Format: `salt(16) + nonce(12) + tag(16) + ciphertext`
+
+### Verify Memory Works
+
+1. Complete a chat session and hang up
+2. Check server logs for `"Saved session summary... with N voice samples, M vitals samples"`
+3. Check `data/users/<hash>/sessions/` for `.enc` files
+4. Reconnect — logs should show `"Loaded N session(s)"`
+5. Agent should reference previous session context and biomarker baselines
 
 ## Running with PM2
 

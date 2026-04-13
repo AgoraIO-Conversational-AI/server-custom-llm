@@ -13,6 +13,7 @@ server-custom-llm/
 │   ├── custom_llm.js            # Main server: endpoints, tool execution, integration
 │   ├── tools.js                 # Tool definitions (weather, calculate, Thymia)
 │   ├── conversation_store.js    # Per-channel message history
+│   ├── memory_store.js          # Encrypted session memory with biomarker averages
 │   ├── audio_manager.js         # Go child process lifecycle + PCM routing
 │   ├── thymia_client.js         # Thymia Sentinel WebSocket client
 │   ├── thymia_store.js          # In-memory biomarker results store
@@ -39,6 +40,7 @@ server-custom-llm/
 | `custom_llm.js` | HTTP endpoints, request routing, streaming SSE, tool execution loop |
 | `tools.js` | Tool schemas + handler functions, RAG data, Thymia tool defs |
 | `conversation_store.js` | Persist messages per `appId:userId:channel`, auto-trim at 100 |
+| `memory_store.js` | Encrypted session history: load/save summaries + biomarker averages per user |
 | `audio_manager.js` | Spawn/manage Go children, parse binary frames, buffer PCM, route to Thymia |
 | `thymia_client.js` | WebSocket connection to Thymia, send audio/transcripts, receive PolicyResults |
 | `thymia_store.js` | Store biomarker results per `appId:channel`, cleanup stale entries |

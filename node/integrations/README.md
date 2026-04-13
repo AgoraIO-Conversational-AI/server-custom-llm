@@ -20,6 +20,11 @@ Each integration module exports:
 | `getToolHandlers()`                                                             | Return tool handler map for dispatch                |
 | `onRequest(ctx)`                                                                | Called on each `/chat/completions` request          |
 | `onResponse(ctx)`                                                               | Called after the LLM produces a response            |
-| `onAgentRegistered(appId, channel, agentId, authHeader, agentEndpoint, prompt)` | Called when an agent is registered                  |
+| `onAgentRegistered(appId, channel, agentId, authHeader, agentEndpoint, prompt, earlyParams)` | Called when an agent is registered                  |
 | `onAgentUnregistered(appId, channel, agentId)`                                  | Called when an agent is unregistered                |
+| `getSystemInjection(appId, channel)`                                            | Return text to inject into system prompt (optional) |
 | `shutdown()`                                                                    | Clean up on server exit                             |
+
+## Memory Module
+
+`memory_store.js` (top-level, not in `integrations/`) implements the same module interface but also reads from Thymia and Shen stores to accumulate biomarker running averages during a session. See **[Session Memory](../README.md#session-memory)** in the Node README.
