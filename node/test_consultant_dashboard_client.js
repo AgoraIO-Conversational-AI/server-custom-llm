@@ -53,7 +53,13 @@ test('buildSessionCompletePayload produces dashboard-compatible structure', () =
 
   const payload = buildSessionCompletePayload(
     state,
-    'Generalized session summary.',
+    {
+      overview: 'Generalized session summary.',
+      biomarker_summary: 'Elevated stress with increased heart rate.',
+      risk_overview: 'Highest safety level reached during the call was 3.',
+      follow_up: 'Review safety plan and confirm external support.',
+      source: 'custom-llm',
+    },
     {
       voice: { stress: { avg: 0.72, count: 4 } },
       vitals: { heart_rate_bpm: { avg: 84.1, count: 8 } },
@@ -66,6 +72,35 @@ test('buildSessionCompletePayload produces dashboard-compatible structure', () =
   assert.equal(payload.profile, 'therapy');
   assert.equal(payload.memory_storage_key, 'users/u123/sessions/abc.enc');
   assert.equal(payload.summary.overview, 'Generalized session summary.');
+  assert.equal(payload.summary.biomarker_summary, 'Elevated stress with increased heart rate.');
+  assert.equal(payload.summary.risk_overview, 'Highest safety level reached during the call was 3.');
+  assert.equal(payload.summary.follow_up, 'Review safety plan and confirm external support.');
   assert.equal(payload.biomarkers.averages.stress, 0.72);
   assert.equal(payload.biomarkers.averages.heart_rate_bpm, 84.1);
+});
+
+test('buildSessionCompletePayload preserves backward compatibility for string summaries', () => {
+  const state = {
+    channel: 'demo-channel',
+    sessionId: 'sess-456',
+    startedAt: '2026-04-13T18:00:00Z',
+    startedAtMs: Date.now() - 300000,
+    dashboard: {
+      clientId: 'client-123',
+      consultantId: 'consultant-456',
+      profileName: 'therapy',
+    },
+  };
+
+  const payload = buildSessionCompletePayload(
+    state,
+    'Legacy summary string.',
+    { voice: {}, vitals: {} },
+    ''
+  );
+
+  assert.equal(payload.summary.overview, 'Legacy summary string.');
+  assert.equal(payload.summary.biomarker_summary, '');
+  assert.equal(payload.summary.risk_overview, '');
+  assert.equal(payload.summary.follow_up, '');
 });

@@ -70,6 +70,7 @@ Shen runs client-side (browser WASM SDK). The server receives vitals via RTM —
 | `MAX_HISTORY_SESSIONS` | Max previous sessions to load on connect | `5`      |
 
 Requires auth on the backend (provides `user_id` via JWT). See [Session Memory](#session-memory) below.
+When consultant-dashboard integration is enabled, call end produces both a private continuity-memory summary and a separate generalized consultant-facing summary payload.
 
 ### Run
 
@@ -106,7 +107,7 @@ node/
   custom_llm.js           # Main server: endpoints, streaming, tool execution, module system
   tools.js                # Tool definitions, RAG data, tool implementations
   conversation_store.js   # In-memory conversation store with trimming
-  memory_store.js         # Encrypted session memory with biomarker averages
+  memory_store.js         # Encrypted session memory with private continuity summaries + biomarker averages
   rtm_client.js           # RTM integration (optional, requires rtm-nodejs)
   audio_subscriber.js     # RTC audio capture wrapper (Go child process)
   integrations/
@@ -246,7 +247,14 @@ Encrypted per-user session history with biomarker averages. When enabled, the me
 
 1. **On connect** — loads previous session summaries from disk, decrypts them, and injects a dated history (with biomarker baselines) into the system prompt
 2. **During session** — accumulates running averages of voice biomarkers (from Thymia) and camera vitals (from Shen) on each LLM request
-3. **On disconnect** — summarizes the conversation via LLM, computes final biomarker averages, encrypts everything, and writes to disk
+3. **On disconnect** — generates a private continuity summary for future AI sessions, computes final biomarker averages, encrypts everything, and writes to disk
+
+If consultant-dashboard integration is configured, the same disconnect path also produces a separate generalized consultant-facing summary payload with:
+
+- `overview`
+- `biomarker_summary`
+- `risk_overview`
+- `follow_up`
 
 ### Safety Rule
 

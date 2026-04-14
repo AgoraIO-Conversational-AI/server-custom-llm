@@ -29,6 +29,26 @@ function flattenBiomarkers(biomarkers) {
   return averages;
 }
 
+function normalizeDashboardSummary(summary) {
+  if (summary && typeof summary === 'object' && !Array.isArray(summary)) {
+    return {
+      overview: summary.overview || '',
+      biomarker_summary: summary.biomarker_summary || '',
+      risk_overview: summary.risk_overview || '',
+      follow_up: summary.follow_up || '',
+      source: summary.source || 'custom-llm',
+    };
+  }
+
+  return {
+    overview: typeof summary === 'string' ? summary : '',
+    biomarker_summary: '',
+    risk_overview: '',
+    follow_up: '',
+    source: 'custom-llm',
+  };
+}
+
 function buildSessionCompletePayload(state, summary, biomarkers, memoryStorageKey) {
   return {
     client_id: state.dashboard.clientId,
@@ -40,14 +60,12 @@ function buildSessionCompletePayload(state, summary, biomarkers, memoryStorageKe
     ended_at: new Date().toISOString(),
     duration_seconds: Math.max(0, Math.round((Date.now() - state.startedAtMs) / 1000)),
     status: 'completed',
-    summary: {
-      overview: summary,
-      source: 'custom-llm',
-    },
+    summary: normalizeDashboardSummary(summary),
     biomarkers: {
       averages: flattenBiomarkers(biomarkers),
       voice: biomarkers?.voice || {},
       vitals: biomarkers?.vitals || {},
+      safety: biomarkers?.safety || {},
     },
     memory_storage_key: memoryStorageKey || '',
     alerts: [],
@@ -72,15 +90,22 @@ async function postSessionComplete(state, summary, biomarkers, memoryStorageKey,
   if (!state?.dashboard) return null;
 
   const url = new URL('/internal/session-complete', state.dashboard.baseUrl);
-  const payload = JSON.stringify(
-    buildSessionCompletePayload(state, summary, biomarkers, memoryStorageKey)
-  );
+  const payloadObject = buildSessionCompletePayload(state, summary, biomarkers, memoryStorageKey);
+  const payload = JSON.stringify(payloadObject);
   const headers = buildSignedHeaders(
     state.dashboard.sharedSecret,
     'POST',
     url.pathname,
     payload
   );
+
+  if (logger) {
+    logger.info(
+      `Posting session-complete to ${url.toString()} for client_id=${state.dashboard.clientId} ` +
+      `session_id=${state.sessionId} summary_overview_len=${(payloadObject.summary?.overview || '').length} ` +
+      `memory_key=${memoryStorageKey || 'none'}`
+    );
+  }
 
   const response = await fetch(url.toString(), {
     method: 'POST',
@@ -95,7 +120,8 @@ async function postSessionComplete(state, summary, biomarkers, memoryStorageKey,
 
   if (logger) {
     logger.info(
-      `Posted session-complete to dashboard for client_id=${state.dashboard.clientId} session_id=${state.sessionId}`
+      `Posted session-complete to dashboard for client_id=${state.dashboard.clientId} ` +
+      `session_id=${state.sessionId} response=${responseText || '{}'}`
     );
   }
 

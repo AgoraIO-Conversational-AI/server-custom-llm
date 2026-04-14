@@ -17,8 +17,25 @@ const MAX_AGE = 86400 * 1000; // 24 hours
 // In-memory store: "appId:channel" -> ThymiaData
 const store = {};
 
+const ALERT_SEVERITY = {
+  false: 0,
+  none: 0,
+  monitor: 1,
+  concern: 2,
+  urgent: 3,
+  emergency: 4,
+  true: 4,
+};
+
 function getKey(appId, channel) {
   return `${appId}:${channel}`;
+}
+
+function getAlertSeverity(alert) {
+  if (typeof alert === 'boolean') {
+    return ALERT_SEVERITY[String(alert)];
+  }
+  return ALERT_SEVERITY[String(alert || 'none').toLowerCase()] || 0;
 }
 
 /**
@@ -45,6 +62,10 @@ function getOrCreate(appId, channel) {
         alert: false,
         concerns: [],
         recommended_actions: [],
+        highest_level: null,
+        highest_alert: false,
+        highest_concerns: [],
+        highest_recommended_actions: [],
       },
       // All raw biomarkers from passthrough (emotions, etc.)
       biomarkers: {},
@@ -112,10 +133,32 @@ function updateFromPolicyResult(appId, channel, result) {
     }
   }
   if (isSafety) {
-    data.safety.level = inner.level !== undefined ? inner.level : data.safety.level;
-    data.safety.alert = inner.alert || false;
-    data.safety.concerns = inner.concerns || [];
-    data.safety.recommended_actions = inner.recommended_actions || data.safety.recommended_actions;
+    const nextLevel = inner.level !== undefined ? inner.level : data.safety.level;
+    const nextAlert = inner.alert || false;
+    const nextConcerns = inner.concerns || [];
+    const nextActions = inner.recommended_actions || data.safety.recommended_actions;
+
+    data.safety.level = nextLevel;
+    data.safety.alert = nextAlert;
+    data.safety.concerns = nextConcerns;
+    data.safety.recommended_actions = nextActions;
+
+    const currentHighestLevel = data.safety.highest_level;
+    const currentHighestAlert = data.safety.highest_alert;
+    const shouldReplaceHighest =
+      currentHighestLevel === null
+      || (typeof nextLevel === 'number' && nextLevel > currentHighestLevel)
+      || (
+        nextLevel === currentHighestLevel
+        && getAlertSeverity(nextAlert) > getAlertSeverity(currentHighestAlert)
+      );
+
+    if (shouldReplaceHighest) {
+      data.safety.highest_level = nextLevel;
+      data.safety.highest_alert = nextAlert;
+      data.safety.highest_concerns = nextConcerns;
+      data.safety.highest_recommended_actions = nextActions;
+    }
   }
 
   data.resultsCount++;

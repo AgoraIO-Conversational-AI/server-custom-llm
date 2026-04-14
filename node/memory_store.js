@@ -98,6 +98,20 @@ function finalizeBiomarkers(bucket) {
   return result;
 }
 
+function summarizeSafety(metrics) {
+  const safety = metrics?.safety || {};
+  return {
+    current_level: safety.level ?? null,
+    current_alert: safety.alert ?? false,
+    current_concerns: safety.concerns || [],
+    current_recommended_actions: safety.recommended_actions || [],
+    highest_level: safety.highest_level ?? null,
+    highest_alert: safety.highest_alert ?? false,
+    highest_concerns: safety.highest_concerns || [],
+    highest_recommended_actions: safety.highest_recommended_actions || [],
+  };
+}
+
 function formatBiomarkerLine(biomarkers) {
   if (!biomarkers) return '';
   const parts = [];
@@ -131,6 +145,88 @@ function formatBiomarkerLine(biomarkers) {
   if (vitalsParts.length) parts.push(vitalsParts.join(', '));
 
   return parts.length ? `Biomarkers: ${parts.join(' | ')}` : '';
+}
+
+function stripMarkdownCodeFence(text) {
+  if (!text) return '';
+  const trimmed = text.trim();
+  const match = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  return match ? match[1].trim() : trimmed;
+}
+
+function normalizeSummaryText(value) {
+  if (typeof value !== 'string') return '';
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+function buildSummaryBiomarkerContext(biomarkers) {
+  const compact = {
+    voice_averages: {},
+    vitals_averages: {},
+    safety: biomarkers?.safety || {},
+  };
+
+  for (const [key, value] of Object.entries(biomarkers?.voice || {})) {
+    if (value && typeof value.avg === 'number') {
+      compact.voice_averages[key] = value.avg;
+    }
+  }
+
+  for (const [key, value] of Object.entries(biomarkers?.vitals || {})) {
+    if (value && typeof value.avg === 'number') {
+      compact.vitals_averages[key] = value.avg;
+    }
+  }
+
+  return JSON.stringify(compact, null, 2);
+}
+
+function buildFallbackSummaries(text, biomarkers) {
+  const normalized = normalizeSummaryText(text);
+  const highestLevel = biomarkers?.safety?.highest_level;
+  const highestConcerns = biomarkers?.safety?.highest_concerns || [];
+  const riskOverviewParts = [];
+
+  if (highestLevel !== null && highestLevel !== undefined) {
+    riskOverviewParts.push(`Highest safety level reached during the call was ${highestLevel}.`);
+  }
+  if (highestConcerns.length) {
+    riskOverviewParts.push(`Key safety concerns: ${highestConcerns.join(', ')}.`);
+  }
+
+  return {
+    memorySummary: normalized,
+    dashboardSummary: {
+      overview: normalized,
+      biomarker_summary: formatBiomarkerLine(biomarkers).replace(/^Biomarkers:\s*/, ''),
+      risk_overview: riskOverviewParts.join(' ').trim(),
+      follow_up: '',
+      source: 'custom-llm',
+    },
+  };
+}
+
+function parseStructuredSummary(content, biomarkers) {
+  const raw = stripMarkdownCodeFence(content);
+  try {
+    const parsed = JSON.parse(raw);
+    const memorySummary = normalizeSummaryText(parsed?.memory_summary);
+    const dashboardSummary = {
+      overview: normalizeSummaryText(parsed?.consultant_summary?.overview),
+      biomarker_summary: normalizeSummaryText(parsed?.consultant_summary?.biomarker_summary),
+      risk_overview: normalizeSummaryText(parsed?.consultant_summary?.risk_overview),
+      follow_up: normalizeSummaryText(parsed?.consultant_summary?.follow_up),
+      source: 'custom-llm',
+    };
+
+    if (!memorySummary || !dashboardSummary.overview) {
+      return buildFallbackSummaries(content, biomarkers);
+    }
+
+    return { memorySummary, dashboardSummary };
+  } catch (_err) {
+    return buildFallbackSummaries(content, biomarkers);
+  }
 }
 
 // ─── Disk operations ───
@@ -196,7 +292,7 @@ function buildInjection(summaries) {
 
 // ─── Summarization ───
 
-async function summarizeConversation(messages, cachedApiKey) {
+async function summarizeConversation(messages, cachedApiKey, biomarkers) {
   const apiKey = cachedApiKey || process.env.LLM_API_KEY || process.env.YOUR_LLM_API_KEY || process.env.OPENAI_API_KEY || '';
   const baseURL = process.env.LLM_BASE_URL || 'https://api.openai.com/v1';
   const model = process.env.LLM_MODEL || 'gpt-4o-mini';
@@ -229,18 +325,56 @@ async function summarizeConversation(messages, cachedApiKey) {
       messages: [
         {
           role: 'system',
-          content: 'Summarize this therapy session concisely. Note: key topics discussed, '
+          content:
+            'You are generating two different summaries for the same session. '
+            + 'Return valid JSON only with this exact shape: '
+            + '{"memory_summary":"...","consultant_summary":{"overview":"...","biomarker_summary":"...","risk_overview":"...","follow_up":"..."}}. '
+            + 'Rules: '
+            + '1) memory_summary is private continuity memory for the AI next session; include broad themes, what helped, unresolved threads, and follow-up needs. '
+            + '2) consultant_summary.overview is a generalized human-facing summary and must avoid unnecessary personal specifics or identifying event detail. '
+            + '3) consultant_summary.biomarker_summary should mention the main biomarker takeaways only when supported by the provided biomarker context. '
+            + '4) consultant_summary.risk_overview must mention the worst safety state reached during the call when safety data is present, even if the session later de-escalated. '
+            + '5) consultant_summary.follow_up should say what a consultant should monitor or revisit next. '
+            + 'Keep each field concise. Do not mention internal systems or dashboards.',
+        },
+        {
+          role: 'user',
+          content: `Conversation:\n${conversationText}\n\nFinal biomarker context:\n${buildSummaryBiomarkerContext(biomarkers)}`,
+        },
+      ],
+      response_format: { type: 'json_object' },
+      max_tokens: 700,
+    });
+    const content = response.choices[0]?.message?.content || null;
+    if (!content) return null;
+    return parseStructuredSummary(content, biomarkers);
+  } catch (err) {
+    logger.error('Structured summarization failed; retrying with text fallback:', err);
+  }
+
+  try {
+    const fallbackResponse = await client.chat.completions.create({
+      model,
+      messages: [
+        {
+          role: 'system',
+          content: 'Summarize this therapy session concisely. Note key topics discussed, '
             + 'emotional themes, any breakthroughs or concerns, and anything to follow up '
             + 'on in the next session. If biomarker data is present, note any significant '
-            + 'patterns (e.g. elevated stress, low HRV). Keep it under 300 words.',
+            + 'patterns and the highest safety risk reached during the call. Keep it under 300 words.',
         },
-        { role: 'user', content: conversationText },
+        {
+          role: 'user',
+          content: `Conversation:\n${conversationText}\n\nFinal biomarker context:\n${buildSummaryBiomarkerContext(biomarkers)}`,
+        },
       ],
       max_tokens: 500,
     });
-    return response.choices[0]?.message?.content || null;
-  } catch (err) {
-    logger.error('Summarization failed:', err);
+    const fallbackContent = fallbackResponse.choices[0]?.message?.content || null;
+    if (!fallbackContent) return null;
+    return buildFallbackSummaries(fallbackContent, biomarkers);
+  } catch (fallbackErr) {
+    logger.error('Summarization failed:', fallbackErr);
     return null;
   }
 }
@@ -415,19 +549,25 @@ module.exports = {
     }
 
     // Summarize via LLM (use cached API key from session requests)
-    const summary = await summarizeConversation(messages, state.llmApiKey);
-    if (!summary) return;
-
-    // Compute final biomarker averages
     const biomarkers = {
       voice: finalizeBiomarkers(state.biomarkers?.voice || {}),
       vitals: finalizeBiomarkers(state.biomarkers?.vitals || {}),
+      safety: summarizeSafety(thymiaStore ? thymiaStore.getMetrics(appId, channel) : null),
     };
+
+    const summaries = await summarizeConversation(messages, state.llmApiKey, biomarkers);
+    if (!summaries) return;
+    logger.info(
+      `Generated session summaries for channel=${channel} session_id=${state.sessionId} ` +
+      `memory_len=${(summaries.memorySummary || '').length} ` +
+      `dashboard_overview_len=${(summaries.dashboardSummary?.overview || '').length}`
+    );
 
     let memoryStorageKey = '';
     if (shouldPersistMemory) {
       try {
-        memoryStorageKey = saveSessionSummary(userId, { summary, biomarkers });
+        memoryStorageKey = saveSessionSummary(userId, { summary: summaries.memorySummary, biomarkers });
+        logger.info(`Saved session memory to ${memoryStorageKey} for user_id=${userId}`);
       } catch (err) {
         logger.error(`Failed to save session summary: ${err.message}`);
       }
@@ -435,7 +575,13 @@ module.exports = {
 
     if (shouldPostDashboard) {
       try {
-        await dashboardClient.postSessionComplete(state, summary, biomarkers, memoryStorageKey, logger);
+        await dashboardClient.postSessionComplete(
+          state,
+          summaries.dashboardSummary,
+          biomarkers,
+          memoryStorageKey,
+          logger
+        );
       } catch (err) {
         logger.error(`Failed to post session-complete to dashboard: ${err.message}`);
       }
