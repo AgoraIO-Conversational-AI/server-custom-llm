@@ -31,8 +31,12 @@ function flattenBiomarkers(biomarkers) {
 
 function normalizeDashboardSummary(summary) {
   if (summary && typeof summary === 'object' && !Array.isArray(summary)) {
+    const briefOverview = summary.brief_overview || summary.overview || '';
+    const fullSummary = summary.full_summary || summary.overview || '';
     return {
-      overview: summary.overview || '',
+      brief_overview: briefOverview,
+      overview: briefOverview,
+      full_summary: fullSummary,
       biomarker_summary: summary.biomarker_summary || '',
       risk_overview: summary.risk_overview || '',
       follow_up: summary.follow_up || '',
@@ -41,7 +45,9 @@ function normalizeDashboardSummary(summary) {
   }
 
   return {
+    brief_overview: typeof summary === 'string' ? summary : '',
     overview: typeof summary === 'string' ? summary : '',
+    full_summary: typeof summary === 'string' ? summary : '',
     biomarker_summary: '',
     risk_overview: '',
     follow_up: '',
@@ -111,6 +117,7 @@ async function postSessionComplete(state, summary, biomarkers, memoryStorageKey,
     method: 'POST',
     headers,
     body: payload,
+    signal: AbortSignal.timeout(8000),
   });
 
   const responseText = await response.text();

@@ -85,15 +85,24 @@ function decryptJSON(encryptedBuf, masterKeyHex, userIdHash) {
 
 function updateRunningAvg(bucket, key, value) {
   if (typeof value !== 'number' || isNaN(value)) return;
-  if (!bucket[key]) bucket[key] = { sum: 0, count: 0 };
+  if (!bucket[key]) bucket[key] = { sum: 0, count: 0, min: value, max: value };
   bucket[key].sum += value;
   bucket[key].count++;
+  bucket[key].min = Math.min(bucket[key].min, value);
+  bucket[key].max = Math.max(bucket[key].max, value);
 }
 
 function finalizeBiomarkers(bucket) {
   const result = {};
-  for (const [key, { sum, count }] of Object.entries(bucket)) {
-    if (count > 0) result[key] = { avg: Math.round((sum / count) * 100) / 100, count };
+  for (const [key, { sum, count, min, max }] of Object.entries(bucket)) {
+    if (count > 0) {
+      result[key] = {
+        avg: Math.round((sum / count) * 100) / 100,
+        count,
+        min: Math.round(min * 100) / 100,
+        max: Math.round(max * 100) / 100,
+      };
+    }
   }
   return result;
 }
@@ -197,7 +206,9 @@ function buildFallbackSummaries(text, biomarkers) {
   return {
     memorySummary: normalized,
     dashboardSummary: {
+      brief_overview: normalized,
       overview: normalized,
+      full_summary: normalized,
       biomarker_summary: formatBiomarkerLine(biomarkers).replace(/^Biomarkers:\s*/, ''),
       risk_overview: riskOverviewParts.join(' ').trim(),
       follow_up: '',
@@ -210,20 +221,27 @@ function parseStructuredSummary(content, biomarkers) {
   const raw = stripMarkdownCodeFence(content);
   try {
     const parsed = JSON.parse(raw);
-    const memorySummary = normalizeSummaryText(parsed?.memory_summary);
+    const fullSummary = normalizeSummaryText(
+      parsed?.consultant_summary?.full_summary || parsed?.memory_summary
+    );
+    const briefOverview = normalizeSummaryText(
+      parsed?.consultant_summary?.brief_overview || parsed?.consultant_summary?.overview
+    );
     const dashboardSummary = {
-      overview: normalizeSummaryText(parsed?.consultant_summary?.overview),
+      brief_overview: briefOverview,
+      overview: briefOverview,
+      full_summary: fullSummary,
       biomarker_summary: normalizeSummaryText(parsed?.consultant_summary?.biomarker_summary),
       risk_overview: normalizeSummaryText(parsed?.consultant_summary?.risk_overview),
       follow_up: normalizeSummaryText(parsed?.consultant_summary?.follow_up),
       source: 'custom-llm',
     };
 
-    if (!memorySummary || !dashboardSummary.overview) {
+    if (!fullSummary || !dashboardSummary.overview) {
       return buildFallbackSummaries(content, biomarkers);
     }
 
-    return { memorySummary, dashboardSummary };
+    return { memorySummary: fullSummary, dashboardSummary };
   } catch (_err) {
     return buildFallbackSummaries(content, biomarkers);
   }
@@ -328,10 +346,10 @@ async function summarizeConversation(messages, cachedApiKey, biomarkers) {
           content:
             'You are generating two different summaries for the same session. '
             + 'Return valid JSON only with this exact shape: '
-            + '{"memory_summary":"...","consultant_summary":{"overview":"...","biomarker_summary":"...","risk_overview":"...","follow_up":"..."}}. '
+            + '{"consultant_summary":{"brief_overview":"...","full_summary":"...","biomarker_summary":"...","risk_overview":"...","follow_up":"..."}}. '
             + 'Rules: '
-            + '1) memory_summary is private continuity memory for the AI next session; include broad themes, what helped, unresolved threads, and follow-up needs. '
-            + '2) consultant_summary.overview is a generalized human-facing summary and must avoid unnecessary personal specifics or identifying event detail. '
+            + '1) consultant_summary.brief_overview is a short consultant-facing summary for quick scanning, 1-2 sentences. '
+            + '2) consultant_summary.full_summary is a fuller consultant-facing summary and will also be reused as AI continuity for future sessions; include broad themes, what helped, unresolved threads, and follow-up needs, while avoiding unnecessary identifying event detail. '
             + '3) consultant_summary.biomarker_summary should mention the main biomarker takeaways only when supported by the provided biomarker context. '
             + '4) consultant_summary.risk_overview must mention the worst safety state reached during the call when safety data is present, even if the session later de-escalated. '
             + '5) consultant_summary.follow_up should say what a consultant should monitor or revisit next. '
