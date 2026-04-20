@@ -24,6 +24,9 @@ const channelAppIdMap = new Map();
 
 let _rtmClientFactory = null;
 let _rtmHandlerRegistered = false;
+const meetingModeChannels = new Set();
+const channelRuntimeKeys = new Map();
+const videoBiomarkerChannels = new Map();
 
 /**
  * Format vitals for LLM system prompt injection.
@@ -110,6 +113,10 @@ function handleRTMMessage(event) {
       logger.debug(`shen.vitals for channel=${channel} but no appId known`);
       return;
     }
+    if (videoBiomarkerChannels.get(channel) === false) {
+      logger.debug(`Ignoring shen.vitals for channel=${channel} because video biomarkers are disabled`);
+      return;
+    }
 
     logger.info(
       `Received shen.vitals: HR=${msg.heart_rate_bpm} HRV=${msg.hrv_sdnn_ms} channel=${channel}`
@@ -184,16 +191,35 @@ module.exports = {
   /**
    * Register agent with shared updater.
    */
-  onAgentRegistered(appId, channel, agentId, authHeader, agentEndpoint, prompt) {
-    agentUpdater.registerAgent(appId, channel, agentId, authHeader, agentEndpoint, prompt);
-    logger.info(`Agent registered: ${agentId} on ${channel}`);
+  onAgentRegistered(appId, channel, agentId, authHeader, agentEndpoint, prompt, earlyParams) {
+    channelRuntimeKeys.set(channel, earlyParams?.meeting_runtime_key || '');
+    videoBiomarkerChannels.set(channel, earlyParams?.video_biomarkers_enabled !== false);
+    if (earlyParams?.meeting_mode) {
+      meetingModeChannels.add(channel);
+    } else {
+      meetingModeChannels.delete(channel);
+    }
+    if (!earlyParams?.meeting_mode) {
+      agentUpdater.registerAgent(appId, channel, agentId, authHeader, agentEndpoint, prompt);
+    }
+    logger.info(`Agent registered: ${agentId} on ${channel} meeting_mode=${!!earlyParams?.meeting_mode}`);
   },
 
   /**
    * Clean up when agent disconnects.
    */
-  onAgentUnregistered(appId, channel, agentId) {
-    agentUpdater.unregisterAgent(appId, channel);
+  onAgentUnregistered(appId, channel, agentId, runtimeKey) {
+    const activeRuntimeKey = channelRuntimeKeys.get(channel) || '';
+    if (activeRuntimeKey && runtimeKey && activeRuntimeKey !== runtimeKey) {
+      logger.info(`Skipping stale Shen cleanup for channel=${channel} runtime=${runtimeKey}`);
+      return;
+    }
+    if (!meetingModeChannels.has(channel)) {
+      agentUpdater.unregisterAgent(appId, channel);
+    }
+    meetingModeChannels.delete(channel);
+    channelRuntimeKeys.delete(channel);
+    videoBiomarkerChannels.delete(channel);
     channelAppIdMap.delete(channel);
     shenStore.clear(appId, channel);
     logger.info(`Agent unregistered: ${agentId} on ${channel}`);

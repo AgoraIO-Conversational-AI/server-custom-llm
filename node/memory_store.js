@@ -22,6 +22,7 @@ const path = require('path');
 const OpenAI = require('openai');
 const { getMessages } = require('./conversation_store');
 const dashboardClient = require('./consultant_dashboard_client');
+const { getMeetingTranscript } = require('./meeting_transcription');
 
 // Conditionally import biomarker stores (may not be present in all deployments)
 let thymiaStore = null;
@@ -212,6 +213,48 @@ function buildFallbackSummaries(text, biomarkers) {
       biomarker_summary: formatBiomarkerLine(biomarkers).replace(/^Biomarkers:\s*/, ''),
       risk_overview: riskOverviewParts.join(' ').trim(),
       follow_up: '',
+      source: 'custom-llm',
+    },
+  };
+}
+
+function buildMeetingModeSummaries(biomarkers, transcript) {
+  const highlights = [];
+  const voice = biomarkers?.voice || {};
+  const vitals = biomarkers?.vitals || {};
+  const safety = biomarkers?.safety || {};
+  const transcriptText = typeof transcript?.text === 'string' ? transcript.text.trim() : '';
+  const transcriptNote = transcriptText
+    ? `Transcript captured with ${transcript.provider || 'speech-to-text'}.`
+    : transcript?.warning
+      ? `Transcript note: ${transcript.warning}`
+      : '';
+
+  if (voice.stress?.avg != null) highlights.push(`stress averaged ${Math.round(voice.stress.avg * 100)}%`);
+  if (voice.distress?.avg != null) highlights.push(`distress averaged ${Math.round(voice.distress.avg * 100)}%`);
+  if (voice.burnout?.avg != null) highlights.push(`burnout averaged ${Math.round(voice.burnout.avg * 100)}%`);
+  if (voice.fatigue?.avg != null) highlights.push(`fatigue averaged ${Math.round(voice.fatigue.avg * 100)}%`);
+  if (vitals.heart_rate_bpm?.avg != null) highlights.push(`heart rate averaged ${Math.round(vitals.heart_rate_bpm.avg)} bpm`);
+
+  const brief = highlights.length
+    ? `Consultant live meeting completed with biomarker collection. Main signals: ${highlights.slice(0, 3).join(', ')}.`
+    : transcriptText
+      ? 'Consultant live meeting completed with transcript available for review.'
+      : 'Consultant live meeting completed with limited biomarker data captured.';
+  const risk = safety.highest_level != null
+    ? `Highest safety level reached during the meeting was ${safety.highest_level}.`
+    : '';
+  const fullSummary = [brief, risk, transcriptNote].filter(Boolean).join(' ').trim();
+
+  return {
+    memorySummary: '',
+    dashboardSummary: {
+      brief_overview: brief,
+      overview: brief,
+      full_summary: fullSummary,
+      biomarker_summary: formatBiomarkerLine(biomarkers).replace(/^Biomarkers:\s*/, ''),
+      risk_overview: risk,
+      follow_up: 'Review the biomarker changes alongside consultant notes from the meeting.',
       source: 'custom-llm',
     },
   };
@@ -415,6 +458,8 @@ module.exports = {
   },
 
   onAgentRegistered(appId, channel, agentId, authHeader, agentEndpoint, prompt, earlyParams) {
+    const meetingMode = !!earlyParams?.meeting_mode;
+    const runtimeKey = earlyParams?.meeting_runtime_key || '';
     const userId = earlyParams?.user_id;
     const shouldPersistMemory = !!(ENCRYPTION_KEY && userId && userId !== 'anonymous');
     const dashboard = dashboardClient.createDashboardConfig(earlyParams);
@@ -426,7 +471,7 @@ module.exports = {
     }
 
     let injection = null;
-    if (shouldPersistMemory) {
+    if (shouldPersistMemory && !meetingMode) {
       logger.info(`Registering memory for channel=${channel} user_id=${userId} appId=${appId}`);
       const dir = getSessionsDir(userId);
       const summaries = loadSessionSummaries(userId);
@@ -446,6 +491,7 @@ module.exports = {
       userId,
       appId,
       channel,
+      runtimeKey,
       injection,
       biomarkers: { voice: {}, vitals: {} },
       startedAt: new Date().toISOString(),
@@ -453,6 +499,7 @@ module.exports = {
       sessionId: crypto.randomUUID(),
       shouldPersistMemory,
       dashboard,
+      meetingMode,
     });
   },
 
@@ -528,12 +575,16 @@ module.exports = {
 
   onResponse(_ctx) {},
 
-  async onAgentUnregistered(appId, channel, agentId) {
+  async onAgentUnregistered(appId, channel, agentId, runtimeKey) {
     logger.info(`onAgentUnregistered called: appId=${appId} channel=${channel} agentId=${agentId}`);
     const state = channelState.get(channel);
+    if (state?.runtimeKey && runtimeKey && state.runtimeKey !== runtimeKey) {
+      logger.info(`Skipping memory cleanup for stale runtime on channel=${channel} runtime=${runtimeKey}`);
+      return;
+    }
     channelState.delete(channel);
 
-    const shouldPersistMemory = !!(state?.shouldPersistMemory && ENCRYPTION_KEY && state?.userId && state.userId !== 'anonymous');
+    const shouldPersistMemory = !!(state?.shouldPersistMemory && ENCRYPTION_KEY && state?.userId && state.userId !== 'anonymous' && !state?.meetingMode);
     const shouldPostDashboard = !!state?.dashboard;
 
     if (!shouldPersistMemory && !shouldPostDashboard) {
@@ -561,7 +612,7 @@ module.exports = {
 
     logger.info(`Found ${messages.length} messages (matched uid='${matchedUid}') for appId=${appId} channel=${channel}`);
 
-    if (messages.length === 0) {
+    if (messages.length === 0 && !state?.meetingMode) {
       logger.info('No conversation messages to summarize — skipping save');
       return;
     }
@@ -572,8 +623,11 @@ module.exports = {
       vitals: finalizeBiomarkers(state.biomarkers?.vitals || {}),
       safety: summarizeSafety(thymiaStore ? thymiaStore.getMetrics(appId, channel) : null),
     };
+    const transcript = state?.meetingMode ? getMeetingTranscript(runtimeKey || state.runtimeKey || '') : null;
 
-    const summaries = await summarizeConversation(messages, state.llmApiKey, biomarkers);
+    const summaries = state?.meetingMode
+      ? buildMeetingModeSummaries(biomarkers, transcript)
+      : await summarizeConversation(messages, state.llmApiKey, biomarkers);
     if (!summaries) return;
     logger.info(
       `Generated session summaries for channel=${channel} session_id=${state.sessionId} ` +
@@ -598,7 +652,8 @@ module.exports = {
           summaries.dashboardSummary,
           biomarkers,
           memoryStorageKey,
-          logger
+          logger,
+          transcript
         );
       } catch (err) {
         logger.error(`Failed to post session-complete to dashboard: ${err.message}`);

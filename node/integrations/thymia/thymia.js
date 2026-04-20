@@ -581,14 +581,18 @@ module.exports = {
    */
   onAgentRegistered(appId, channel, agentId, authHeader, agentEndpoint, prompt, earlyParams) {
     const key = getKey(appId, channel);
-    agentMap.set(key, { agentId, authHeader, agentEndpoint, originalPrompt: prompt || null });
-    // Register with shared updater (idempotent — Shen may also register)
-    agentUpdater.registerAgent(appId, channel, agentId, authHeader, agentEndpoint, prompt);
-    logger.info(`[AgentRegistered] ${key} → agent=${agentId} prompt_len=${(prompt || '').length}`);
+    const meetingMode = !!earlyParams?.meeting_mode;
+    const runtimeKey = earlyParams?.meeting_runtime_key || '';
+    const audioBiomarkersEnabled = earlyParams?.audio_biomarkers_enabled !== false;
+    agentMap.set(key, { agentId, authHeader, agentEndpoint, originalPrompt: prompt || null, meetingMode, runtimeKey });
+    if (!meetingMode) {
+      agentUpdater.registerAgent(appId, channel, agentId, authHeader, agentEndpoint, prompt);
+    }
+    logger.info(`[AgentRegistered] ${key} → agent=${agentId} prompt_len=${(prompt || '').length} meeting_mode=${meetingMode}`);
 
     // Early-start audio subscriber + Thymia if tokens were provided at registration
     const ep = earlyParams || {};
-    if (ep.subscriber_token && ep.user_uid) {
+    if (audioBiomarkersEnabled && ep.subscriber_token && ep.user_uid) {
       if (_audioSubscriber && !_audioSubscriber.hasSession(appId, channel)) {
         _audioSubscriber.startSession(appId, channel, ep.user_uid, ep.subscriber_token);
         logger.info(`[AgentRegistered] Early-started audio subscriber for ${key}`);
@@ -605,6 +609,8 @@ module.exports = {
         });
         logger.info(`[AgentRegistered] Early-started Thymia for ${key}`);
       }
+    } else if (!audioBiomarkersEnabled) {
+      logger.info(`[AgentRegistered] Audio biomarkers disabled for ${key}, skipping audio subscriber + Thymia`);
     }
   },
 
@@ -676,14 +682,26 @@ module.exports = {
     }
   },
 
+  onTranscriptLine(ctx) {
+    const { appId, channel, uid, text, guestUid } = ctx || {};
+    if (!text) return;
+    if (String(uid || '') !== String(guestUid || '101')) return;
+    sendTranscript(appId, channel, 'user', text);
+  },
+
   // getSystemInjection removed — biomarkers now pushed via Agent Update API directly to ConvoAI engine
 
   /**
    * Called when an agent is unregistered (call ended / hangup).
    * Disconnects Thymia client and cleans up state for this channel.
    */
-  onAgentUnregistered(appId, channel, agentId) {
+  onAgentUnregistered(appId, channel, agentId, runtimeKey) {
     const key = getKey(appId, channel);
+    const agent = agentMap.get(key);
+    if (agent?.runtimeKey && runtimeKey && agent.runtimeKey !== runtimeKey) {
+      logger.info(`[AgentUnregistered] skipping stale runtime ${runtimeKey} on ${key}`);
+      return;
+    }
     logger.info(`[AgentUnregistered] ${key} agent=${agentId}`);
 
     // Disconnect Thymia client for this channel
@@ -698,7 +716,9 @@ module.exports = {
 
     // Remove from agent map and shared updater
     agentMap.delete(key);
-    agentUpdater.unregisterAgent(appId, channel);
+    if (!agent?.meetingMode) {
+      agentUpdater.unregisterAgent(appId, channel);
+    }
 
     // Clear store data for this channel
     thymiaStore.remove(appId, channel);

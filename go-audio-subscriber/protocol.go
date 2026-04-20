@@ -22,6 +22,13 @@ type StatusMessage struct {
 	Error   string `json:"error,omitempty"`
 }
 
+type StreamMessage struct {
+	Type     string `json:"type"`
+	UID      string `json:"uid"`
+	StreamID int    `json:"stream_id"`
+	Data     string `json:"data"`
+}
+
 // FrameWriter writes framed binary data to stdout.
 // Protocol: [1-byte type][4-byte BE length][payload]
 type FrameWriter struct {
@@ -37,6 +44,14 @@ func NewFrameWriter(w io.Writer) *FrameWriter {
 // WriteJSON sends a JSON status frame (type 0x01)
 func (fw *FrameWriter) WriteJSON(msg *StatusMessage) error {
 	data, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	return fw.writeFrame(FrameTypeJSON, data)
+}
+
+func (fw *FrameWriter) WriteObject(v interface{}) error {
+	data, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}

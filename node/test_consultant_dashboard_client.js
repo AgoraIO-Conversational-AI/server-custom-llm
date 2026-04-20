@@ -27,6 +27,23 @@ test('createDashboardConfig returns config when metadata is present', () => {
   assert.equal(config.profileName, 'therapy');
 });
 
+test('createDashboardConfig accepts generic meeting context fields', () => {
+  const config = createDashboardConfig({
+    meeting_context_url: 'http://127.0.0.1:8090',
+    meeting_shared_secret: 'secret',
+    client_id: 'client-123',
+    consultant_id: 'consultant-456',
+    meeting_id: 'meeting-789',
+    meeting_runtime_key: 'test-app:room_abc:meeting-789',
+    meeting_mode: true,
+  });
+
+  assert.equal(config.baseUrl, 'http://127.0.0.1:8090');
+  assert.equal(config.meetingId, 'meeting-789');
+  assert.equal(config.meetingRuntimeKey, 'test-app:room_abc:meeting-789');
+  assert.equal(config.meetingMode, true);
+});
+
 test('flattenBiomarkers produces averages map', () => {
   const averages = flattenBiomarkers({
     voice: { stress: { avg: 0.72, count: 4, min: 0.5, max: 0.9 } },
@@ -66,11 +83,13 @@ test('buildSessionCompletePayload produces dashboard-compatible structure', () =
       voice: { stress: { avg: 0.72, count: 4, min: 0.5, max: 0.9 } },
       vitals: { heart_rate_bpm: { avg: 84.1, count: 8, min: 74, max: 96 } },
     },
-    'users/u123/sessions/abc.enc'
+    'users/u123/sessions/abc.enc',
+    { provider: 'agora_stt', text: 'Client discussed stress at work.' }
   );
 
   assert.equal(payload.client_id, 'client-123');
   assert.equal(payload.consultant_id, 'consultant-456');
+  assert.equal(payload.session_kind, 'avatar_ai_session');
   assert.equal(payload.profile, 'therapy');
   assert.equal(payload.memory_storage_key, 'users/u123/sessions/abc.enc');
   assert.equal(payload.summary.brief_overview, 'Generalized session summary.');
@@ -81,6 +100,32 @@ test('buildSessionCompletePayload produces dashboard-compatible structure', () =
   assert.equal(payload.summary.follow_up, 'Review safety plan and confirm external support.');
   assert.equal(payload.biomarkers.averages.stress, 0.72);
   assert.equal(payload.biomarkers.averages.heart_rate_bpm, 84.1);
+  assert.equal(payload.transcript.provider, 'agora_stt');
+  assert.equal(payload.transcript.text, 'Client discussed stress at work.');
+});
+
+test('buildSessionCompletePayload includes meeting metadata when present', () => {
+  const payload = buildSessionCompletePayload(
+    {
+      channel: 'meeting-channel',
+      sessionId: 'sess-meeting',
+      startedAt: '2026-04-13T18:00:00Z',
+      startedAtMs: Date.now() - 300000,
+      dashboard: {
+        clientId: 'client-123',
+        consultantId: 'consultant-456',
+        profileName: 'therapy',
+        meetingId: 'meeting-789',
+        meetingMode: true,
+      },
+    },
+    { brief_overview: 'Meeting finished.', full_summary: 'Meeting finished.' },
+    { voice: {}, vitals: {} },
+    ''
+  );
+
+  assert.equal(payload.session_kind, 'consultant_live_session');
+  assert.equal(payload.meeting_id, 'meeting-789');
 });
 
 test('buildSessionCompletePayload preserves backward compatibility for string summaries', () => {

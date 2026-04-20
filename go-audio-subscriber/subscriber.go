@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"time"
@@ -143,6 +144,24 @@ func (s *Subscriber) Start(appID, channel, botUID, token, targetUID string) erro
 	}
 
 	s.conn.RegisterObserver(connObserver)
+
+	localUserObserver := &agoraservice.LocalUserObserver{
+		OnStreamMessage: func(localUser *agoraservice.LocalUser, uid string, streamId int, data []byte) {
+			if len(data) == 0 {
+				return
+			}
+			if err := s.writer.WriteObject(&StreamMessage{
+				Type:     "stream_message",
+				UID:      uid,
+				StreamID: streamId,
+				Data:     base64.StdEncoding.EncodeToString(data),
+			}); err != nil {
+				logger.Printf("Error writing stream message: %v", err)
+			}
+		},
+	}
+	s.conn.RegisterLocalUserObserver(localUserObserver)
+	logger.Println("Local user observer registered")
 
 	// Connect
 	s.conn.Connect(token, channel, botUID)

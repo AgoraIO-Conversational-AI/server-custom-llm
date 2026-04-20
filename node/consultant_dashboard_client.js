@@ -2,8 +2,8 @@ const crypto = require('crypto');
 
 function createDashboardConfig(earlyParams) {
   if (!earlyParams) return null;
-  const baseUrl = earlyParams.consultant_dashboard_url || '';
-  const sharedSecret = earlyParams.consultant_dashboard_shared_secret || '';
+  const baseUrl = earlyParams.meeting_context_url || earlyParams.consultant_dashboard_url || '';
+  const sharedSecret = earlyParams.meeting_shared_secret || earlyParams.consultant_dashboard_shared_secret || '';
   const clientId = earlyParams.client_id || '';
   if (!baseUrl || !sharedSecret || !clientId) return null;
   return {
@@ -13,6 +13,9 @@ function createDashboardConfig(earlyParams) {
     consultantId: earlyParams.consultant_id || '',
     consultantName: earlyParams.consultant_name || '',
     profileName: earlyParams.profile_name || 'default',
+    meetingId: earlyParams.meeting_id || '',
+    meetingMode: !!earlyParams.meeting_mode,
+    meetingRuntimeKey: earlyParams.meeting_runtime_key || '',
   };
 }
 
@@ -55,11 +58,13 @@ function normalizeDashboardSummary(summary) {
   };
 }
 
-function buildSessionCompletePayload(state, summary, biomarkers, memoryStorageKey) {
+function buildSessionCompletePayload(state, summary, biomarkers, memoryStorageKey, transcript) {
   return {
     client_id: state.dashboard.clientId,
     consultant_id: state.dashboard.consultantId,
     session_id: state.sessionId,
+    session_kind: state.dashboard.meetingMode ? 'consultant_live_session' : 'avatar_ai_session',
+    meeting_id: state.dashboard.meetingId || '',
     profile: state.dashboard.profileName,
     channel: state.channel,
     started_at: state.startedAt,
@@ -74,6 +79,7 @@ function buildSessionCompletePayload(state, summary, biomarkers, memoryStorageKe
       safety: biomarkers?.safety || {},
     },
     memory_storage_key: memoryStorageKey || '',
+    transcript: transcript || null,
     alerts: [],
   };
 }
@@ -92,11 +98,11 @@ function buildSignedHeaders(sharedSecret, method, pathname, payload) {
   };
 }
 
-async function postSessionComplete(state, summary, biomarkers, memoryStorageKey, logger) {
+async function postSessionComplete(state, summary, biomarkers, memoryStorageKey, logger, transcript) {
   if (!state?.dashboard) return null;
 
   const url = new URL('/internal/session-complete', state.dashboard.baseUrl);
-  const payloadObject = buildSessionCompletePayload(state, summary, biomarkers, memoryStorageKey);
+  const payloadObject = buildSessionCompletePayload(state, summary, biomarkers, memoryStorageKey, transcript);
   const payload = JSON.stringify(payloadObject);
   const headers = buildSignedHeaders(
     state.dashboard.sharedSecret,

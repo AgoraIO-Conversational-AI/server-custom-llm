@@ -4,7 +4,7 @@ const morgan = require('morgan');
 const dotenv = require('dotenv');
 const OpenAI = require('openai');
 const fs = require('fs').promises;
-const { randomUUID } = require('crypto');
+const { randomUUID, timingSafeEqual } = require('crypto');
 
 const {
   TOOL_DEFINITIONS,
@@ -17,6 +17,14 @@ const {
   getMessages,
 } = require('./conversation_store');
 const { AudioSubscriber } = require('./audio_subscriber');
+const {
+  startMeetingTranscription,
+  stopMeetingTranscription,
+  getMeetingTranscript,
+  setMeetingTranscript,
+  appendMeetingTranscriptLine,
+} = require('./meeting_transcription');
+const { extractFinalTranscriptLine } = require('./agora_stt_proto');
 
 // Load environment variables
 dotenv.config();
@@ -29,6 +37,10 @@ const DEFAULT_LLM_API_KEY =
   '';
 const DEFAULT_LLM_BASE_URL = process.env.LLM_BASE_URL || 'https://api.openai.com/v1';
 const DEFAULT_LLM_MODEL = process.env.LLM_MODEL || 'gpt-4o-mini';
+const AGENT_SERVER_SHARED_SECRET = process.env.AGENT_SERVER_SHARED_SECRET || '';
+const MAX_TRANSCRIPT_TEXT_LENGTH = 200000;
+const MAX_TRANSCRIPT_LINES = 5000;
+const MAX_TRANSCRIPT_LINE_LENGTH = 2000;
 
 /**
  * Get an OpenAI client for this request.
@@ -88,38 +100,230 @@ const logger = {
   warn: (message) => console.warn(`WARN: ${message}`),
 };
 
+function requireAgentServerSecret(req, res, next) {
+  if (!AGENT_SERVER_SHARED_SECRET) return next();
+  const supplied = String(req.headers['x-agent-server-secret'] || '');
+  const expected = AGENT_SERVER_SHARED_SECRET;
+  if (supplied.length !== expected.length) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  const valid = timingSafeEqual(Buffer.from(supplied), Buffer.from(expected));
+  if (!valid) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  return next();
+}
+
+function sanitizeTranscriptPayload(transcript) {
+  if (!transcript || typeof transcript !== 'object' || Array.isArray(transcript)) {
+    return null;
+  }
+  const safe = {};
+  if (typeof transcript.warning === 'string') {
+    safe.warning = transcript.warning.slice(0, 1000);
+  }
+  if (transcript.metadata && typeof transcript.metadata === 'object' && !Array.isArray(transcript.metadata)) {
+    safe.metadata = transcript.metadata;
+  }
+  if (typeof transcript.text === 'string') {
+    safe.text = transcript.text.slice(0, MAX_TRANSCRIPT_TEXT_LENGTH);
+  }
+  if (Array.isArray(transcript.lines)) {
+    safe.lines = transcript.lines
+      .slice(0, MAX_TRANSCRIPT_LINES)
+      .map((line) => {
+        const item = line && typeof line === 'object' ? line : {};
+        return {
+          uid: String(item.uid || '').slice(0, 64),
+          time: String(item.time || '').slice(0, 64),
+          text: typeof item.text === 'string' ? item.text.slice(0, MAX_TRANSCRIPT_LINE_LENGTH) : '',
+          source_lang: typeof item.source_lang === 'string' ? item.source_lang.slice(0, 32) : '',
+        };
+      })
+      .filter((line) => line.text);
+  }
+  return safe;
+}
+
 // Middleware
 app.use(cors());
 app.use(morgan('dev'));
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 
 // Health check endpoint
 app.get('/ping', (req, res) => {
   res.json({ message: 'pong' });
 });
 
-// ─── Agent Registry (appId:channel → agentId + auth) ───
+// ─── Agent Registry (meeting runtime key → agent metadata) ───
 const agentRegistry = new Map();
+const channelRuntimeIndex = new Map();
+const MEETING_STALE_SESSION_TIMEOUT = 8 * 60 * 60 * 1000; // 8 hours for human meeting sessions
 
-function registerAgent(appId, channel, agentId, authHeader, agentEndpoint, maxSessionDuration) {
-  const key = `${appId}:${channel}`;
-  agentRegistry.set(key, { agentId, authHeader, agentEndpoint, registeredAt: Date.now(), maxSessionDuration: maxSessionDuration || 0, wrapUpSent: false });
-  logger.info(`[AgentRegistry] registered ${key} → agent=${agentId} maxDuration=${maxSessionDuration || 'none'}`);
+function getChannelKey(appId, channel) {
+  return `${appId}:${channel}`;
 }
 
-function unregisterAgent(appId, channel) {
-  const key = `${appId}:${channel}`;
+function getRuntimeKey(appId, channel, meetingRuntimeKey = '') {
+  return meetingRuntimeKey || getChannelKey(appId, channel);
+}
+
+function registerAgent(appId, channel, agentId, authHeader, agentEndpoint, maxSessionDuration, options = {}) {
+  const channelKey = getChannelKey(appId, channel);
+  const key = getRuntimeKey(appId, channel, options.meetingRuntimeKey || '');
+  const currentRuntimeKey = channelRuntimeIndex.get(channelKey);
+  if (currentRuntimeKey && currentRuntimeKey !== key) {
+    const existing = agentRegistry.get(currentRuntimeKey);
+    if (existing?.meetingMode) {
+      throw new Error(`channel_busy:${channelKey}`);
+    }
+  }
+  agentRegistry.set(key, {
+    appId,
+    channel,
+    runtimeKey: key,
+    agentId,
+    authHeader,
+    agentEndpoint,
+    registeredAt: Date.now(),
+    maxSessionDuration: maxSessionDuration || 0,
+    wrapUpSent: false,
+    meetingMode: !!options.meetingMode,
+    guestUid: options.guestUid || '',
+    hostUid: options.hostUid || '',
+    transcriptionEnabled: !!options.transcriptionEnabled,
+    transcriptionProvider: options.transcriptionProvider || '',
+    transcriptionLanguage: options.transcriptionLanguage || 'en-US',
+    transcriptionBotUid: options.transcriptionBotUid || '104',
+    transcriptionBotToken: options.transcriptionBotToken || '',
+  });
+  channelRuntimeIndex.set(channelKey, key);
+  logger.info(
+    `[AgentRegistry] registered ${key} → agent=${agentId} maxDuration=${maxSessionDuration || 'none'} meetingMode=${!!options.meetingMode}`
+  );
+  return key;
+}
+
+function unregisterAgent(appId, channel, meetingRuntimeKey = '') {
+  const channelKey = getChannelKey(appId, channel);
+  const key = meetingRuntimeKey || channelRuntimeIndex.get(channelKey) || channelKey;
   const entry = agentRegistry.get(key);
   if (entry) {
     agentRegistry.delete(key);
+    if (channelRuntimeIndex.get(channelKey) === key) {
+      channelRuntimeIndex.delete(channelKey);
+    }
     logger.info(`[AgentRegistry] unregistered ${key} (agent=${entry.agentId})`);
   }
   return entry;
 }
 
 function getAgent(appId, channel) {
-  return agentRegistry.get(`${appId}:${channel}`) || null;
+  const channelKey = getChannelKey(appId, channel);
+  const runtimeKey = channelRuntimeIndex.get(channelKey) || channelKey;
+  return agentRegistry.get(runtimeKey) || null;
 }
+
+function getParticipantRoleForUid(entry, uid) {
+  const normalizedUid = String(uid || '');
+  if (normalizedUid && normalizedUid === String(entry?.hostUid || '103')) return 'host';
+  return 'guest';
+}
+
+function publishMeetingTranscriptLine(channel, entry, line) {
+  try {
+    const rtm = require('./rtm_client');
+    const timestamp = Date.parse(line.time || '') || Date.now();
+    const payload = {
+      object: 'meeting_chat',
+      message_id: `stt:${line.uid}:${line.time || timestamp}:${line.text}`,
+      sender_uid: String(line.uid || entry?.guestUid || '101'),
+      sender_role: getParticipantRoleForUid(entry, line.uid),
+      text: String(line.text || ''),
+      timestamp,
+    };
+    rtm.sendRTMMessage(channel, JSON.stringify(payload)).catch((error) => {
+      logger.error(`[TranscriptLine] failed to publish RTM transcript line: ${error.message}`);
+    });
+  } catch (error) {
+    logger.error(`[TranscriptLine] failed to access RTM client: ${error.message}`);
+  }
+}
+
+function saveMeetingTranscriptLine(appId, channel, entry, line) {
+  try {
+    const role = String(line.uid || '') === String(entry?.hostUid || '103')
+      ? 'assistant'
+      : 'user';
+    saveMessage(appId, '', channel, {
+      role,
+      content: String(line.text || ''),
+    });
+  } catch (error) {
+    logger.error(`[TranscriptLine] failed to save conversation transcript line: ${error.message}`);
+  }
+}
+
+function ensureMeetingTranscriptionForEntry(entry) {
+  if (!entry?.meetingMode || !entry?.transcriptionEnabled) return;
+  const transcript = getMeetingTranscript(entry.runtimeKey);
+  if (transcript?.status === 'running' || transcript?.status === 'starting' || transcript?.status === 'stopping') {
+    return;
+  }
+  const subscribeAudioUids = [
+    String(entry.guestUid || '101'),
+    String(entry.hostUid || '103'),
+  ].filter(Boolean);
+  startMeetingTranscription(
+    {
+      runtimeKey: entry.runtimeKey,
+      appId: entry.appId,
+      channel: entry.channel,
+      provider: entry.transcriptionProvider || '',
+      language: entry.transcriptionLanguage || 'en-US',
+      userUid: entry.guestUid || '101',
+      subscribeAudioUids,
+      botUid: entry.transcriptionBotUid || '104',
+      botToken: entry.transcriptionBotToken || '',
+    },
+    logger,
+  ).catch((error) => {
+    logger.error(`[MeetingTranscription] failed to ensure transcription for ${entry.runtimeKey}: ${error.message}`);
+  });
+}
+
+audioSubscriber.on('stream_message', (appId, channel, message) => {
+  try {
+    const entry = getAgent(appId, channel);
+    if (!entry?.meetingMode) return;
+    const line = extractFinalTranscriptLine(message?.data);
+    if (!line) return;
+    logger.info(`[TranscriptLine] runtime=${entry.runtimeKey} uid=${line.uid} text=${line.text.slice(0, 80)}`);
+    appendMeetingTranscriptLine(entry.runtimeKey, line);
+    saveMeetingTranscriptLine(appId, channel, entry, line);
+    publishMeetingTranscriptLine(channel, entry, line);
+    for (const mod of modules) {
+      if (typeof mod.onTranscriptLine === 'function') {
+        try {
+          mod.onTranscriptLine({
+            appId,
+            channel,
+            runtimeKey: entry.runtimeKey,
+            uid: line.uid,
+            text: line.text,
+            sourceLang: line.source_lang,
+            guestUid: entry.guestUid || '101',
+            hostUid: entry.hostUid || '103',
+          });
+        } catch (error) {
+          logger.error(`[TranscriptLine] module callback failed: ${error.message}`);
+        }
+      }
+    }
+  } catch (error) {
+    logger.error(`[TranscriptLine] failed to handle stream message: ${error.message}`);
+  }
+});
 
 // ─── Stale Session Cleanup ───
 // Safety net: if neither /unregister-agent nor RTM presence fires (e.g. server
@@ -132,35 +336,35 @@ const STALE_CHECK_INTERVAL = 60 * 1000; // check every minute
 const lastRequestTime = new Map();
 
 function markChannelActive(appId, channel) {
-  lastRequestTime.set(`${appId}:${channel}`, Date.now());
+  lastRequestTime.set(getChannelKey(appId, channel), Date.now());
 }
 
 const staleTimer = setInterval(() => {
   const now = Date.now();
   for (const [key, entry] of agentRegistry.entries()) {
-    const lastActive = lastRequestTime.get(key) || entry.registeredAt;
+    const staleTimeout = entry.meetingMode ? MEETING_STALE_SESSION_TIMEOUT : STALE_SESSION_TIMEOUT;
+    const lastActive = lastRequestTime.get(getChannelKey(entry.appId, entry.channel)) || entry.registeredAt;
     const idleMs = now - lastActive;
-    if (idleMs > STALE_SESSION_TIMEOUT) {
-      const [appId, channel] = key.split(':');
+    if (idleMs > staleTimeout) {
       logger.info(`[StaleCleanup] Session ${key} idle for ${Math.round(idleMs / 1000)}s — triggering cleanup`);
 
-      const removed = unregisterAgent(appId, channel);
+      const removed = unregisterAgent(entry.appId, entry.channel, entry.runtimeKey);
       if (!removed) continue;
 
-      audioSubscriber.stopSession(appId, channel);
+      audioSubscriber.stopSession(entry.appId, entry.channel);
 
       try {
         const rtm = require('./rtm_client');
-        rtm.destroySession(channel).catch(() => {});
+        rtm.destroySession(entry.channel).catch(() => {});
       } catch (e) { /* rtm not available */ }
 
       for (const mod of modules) {
         if (mod.onAgentUnregistered) {
-          mod.onAgentUnregistered(appId, channel, removed.agentId);
+          mod.onAgentUnregistered(entry.appId, entry.channel, removed.agentId, removed.runtimeKey);
         }
       }
 
-      lastRequestTime.delete(key);
+      lastRequestTime.delete(getChannelKey(entry.appId, entry.channel));
       logger.info(`[StaleCleanup] Cleanup complete for ${key} (agent=${removed.agentId})`);
     }
   }
@@ -184,18 +388,49 @@ app.get('/', (req, res) => {
 
 // ─── Agent Registration Endpoint ───
 // Called by simple-backend after successful join to map appId+channel → agentId
-app.post('/register-agent', (req, res) => {
+app.post('/register-agent', requireAgentServerSecret, (req, res) => {
   const { app_id, channel, agent_id, auth_header, agent_endpoint, prompt,
           user_uid, subscriber_token, rtm_token, rtm_uid, thymia_api_key,
           user_id, user_name, max_session_duration,
           client_id, consultant_id, consultant_name,
           consultant_dashboard_url, consultant_dashboard_shared_secret,
-          profile_name } = req.body;
-  if (!app_id || !channel || !agent_id) {
+          profile_name, meeting_mode, meeting_id, participant_role,
+          host_uid, guest_uid, meeting_context_url, meeting_shared_secret,
+          meeting_runtime_key, transcription_enabled, transcription_provider,
+          transcription_language, transcription_bot_uid, transcription_bot_token,
+          audio_biomarkers_enabled, video_biomarkers_enabled } = req.body;
+  const resolvedAgentId = agent_id || (meeting_mode ? `meeting:${meeting_id || channel}` : '');
+  if (!app_id || !channel || !resolvedAgentId) {
     logger.error('[RegisterAgent] missing required fields: app_id, channel, agent_id');
     return res.status(400).json({ error: 'Missing app_id, channel, or agent_id' });
   }
-  registerAgent(app_id, channel, agent_id, auth_header, agent_endpoint, max_session_duration);
+  let runtimeKey;
+  try {
+    runtimeKey = registerAgent(
+      app_id,
+      channel,
+      resolvedAgentId,
+      auth_header,
+      agent_endpoint,
+      max_session_duration,
+      {
+        meetingMode: !!meeting_mode,
+        meetingRuntimeKey: meeting_runtime_key || '',
+        guestUid: guest_uid || '',
+        hostUid: host_uid || '',
+        transcriptionEnabled: !!transcription_enabled,
+        transcriptionProvider: transcription_provider || '',
+        transcriptionLanguage: transcription_language || 'en-US',
+        transcriptionBotUid: transcription_bot_uid || '104',
+        transcriptionBotToken: transcription_bot_token || '',
+      }
+    );
+  } catch (error) {
+    if (String(error.message || '').startsWith('channel_busy:')) {
+      return res.status(409).json({ error: 'Meeting channel is still draining. Please retry shortly.' });
+    }
+    throw error;
+  }
   logger.info(`[RegisterAgent] prompt_len=${(prompt || '').length} has_tokens=${!!subscriber_token} user_id=${user_id || 'none'}`);
   // Notify modules about the agent registration (include early-start params)
   const earlyParams = {
@@ -203,33 +438,90 @@ app.post('/register-agent', (req, res) => {
     user_id, user_name, max_session_duration,
     client_id, consultant_id, consultant_name,
     consultant_dashboard_url, consultant_dashboard_shared_secret,
-    profile_name,
+    profile_name, meeting_mode, meeting_id, participant_role,
+    host_uid, guest_uid, meeting_context_url, meeting_shared_secret,
+    meeting_runtime_key: runtimeKey,
+    audio_biomarkers_enabled, video_biomarkers_enabled,
+    transcription_enabled, transcription_provider, transcription_language,
+    transcription_bot_uid, transcription_bot_token,
   };
-  for (const mod of modules) {
-    if (mod.onAgentRegistered) {
-      mod.onAgentRegistered(app_id, channel, agent_id, auth_header, agent_endpoint, prompt, earlyParams);
+  if (app_id && channel && rtm_uid && rtm_token) {
+    try {
+      const rtm = require('./rtm_client');
+      rtm.initRTMWithParams(app_id, rtm_uid, rtm_token, channel).catch((e) => {
+        logger.error(`[RegisterAgent] RTM early init failed: ${e.message}`);
+      });
+    } catch (_err) {
+      // optional dependency
     }
   }
-  res.json({ success: true, key: `${app_id}:${channel}`, agent_id });
+  for (const mod of modules) {
+    if (mod.onAgentRegistered) {
+      mod.onAgentRegistered(app_id, channel, resolvedAgentId, auth_header, agent_endpoint, prompt, earlyParams);
+    }
+  }
+  if (meeting_mode && transcription_enabled) {
+    startMeetingTranscription(
+      {
+        runtimeKey,
+        appId: app_id,
+        channel,
+        provider: transcription_provider || '',
+        language: transcription_language || 'en-US',
+        userUid: user_uid || guest_uid || '101',
+        subscribeAudioUids: [
+          String(guest_uid || user_uid || '101'),
+          String(host_uid || '103'),
+        ],
+        botUid: transcription_bot_uid || '104',
+        botToken: transcription_bot_token || '',
+      },
+      logger,
+    ).catch((error) => {
+      logger.error(`[RegisterAgent] failed to start meeting transcription: ${error.message}`);
+    });
+  }
+  res.json({ success: true, key: runtimeKey, agent_id: resolvedAgentId, meeting_runtime_key: runtimeKey });
 });
 
 // ─── Agent Unregistration Endpoint ───
 // Called by simple-backend on hangup to clean up audio subscriber + modules
-app.post('/unregister-agent', (req, res) => {
-  const { app_id, channel } = req.body;
+app.post('/unregister-agent', requireAgentServerSecret, async (req, res) => {
+  const { app_id, channel, meeting_runtime_key, transcript } = req.body;
   if (!app_id || !channel) {
     logger.error('[UnregisterAgent] missing required fields: app_id, channel');
     return res.status(400).json({ error: 'Missing app_id or channel' });
   }
 
-  const entry = unregisterAgent(app_id, channel);
+  let safeTranscript = null;
+  if (transcript != null) {
+    safeTranscript = sanitizeTranscriptPayload(transcript);
+    if (!safeTranscript) {
+      return res.status(400).json({ error: 'Invalid transcript payload' });
+    }
+  }
+
+  const entry = unregisterAgent(app_id, channel, meeting_runtime_key || '');
   if (!entry) {
     logger.info(`[UnregisterAgent] no agent registered for ${app_id}:${channel}`);
     return res.json({ success: true, message: 'No agent was registered for this channel' });
   }
 
+  if (entry.meetingMode && transcript) {
+    try {
+      setMeetingTranscript(entry.runtimeKey, safeTranscript);
+    } catch (error) {
+      logger.error(`[UnregisterAgent] transcript store error: ${error.message}`);
+    }
+  }
+
   // Stop audio subscriber session for this channel
   audioSubscriber.stopSession(app_id, channel);
+  try {
+    await stopMeetingTranscription(entry.runtimeKey, logger);
+  } catch (error) {
+    logger.error(`[UnregisterAgent] transcription stop error: ${error.message}`);
+  }
 
   // Destroy RTM session for this channel
   try {
@@ -244,12 +536,12 @@ app.post('/unregister-agent', (req, res) => {
   // Notify modules (e.g. Thymia disconnect)
   for (const mod of modules) {
     if (mod.onAgentUnregistered) {
-      mod.onAgentUnregistered(app_id, channel, entry.agentId);
+      mod.onAgentUnregistered(app_id, channel, entry.agentId, entry.runtimeKey);
     }
   }
 
   logger.info(`[UnregisterAgent] cleaned up ${app_id}:${channel} (agent=${entry.agentId})`);
-  res.json({ success: true, agent_id: entry.agentId });
+  res.json({ success: true, agent_id: entry.agentId, meeting_runtime_key: entry.runtimeKey });
 });
 
 // ─── Helpers ───
@@ -417,11 +709,15 @@ app.post('/chat/completions', async (req, res) => {
 
     logger.info(`Context: appId=${appId}, userId=${userId}, channel=${channel}, model=${model} thymia_key_in_params=${thymiaApiKey ? 'yes' : 'no'} auth_user=${authenticatedUserId || 'none'}`);
 
+    const agentEntry = getAgent(appId, channel);
+    if (agentEntry?.meetingMode) {
+      return res.status(409).json({ detail: 'This channel is registered in meeting mode and does not accept LLM chat requests.' });
+    }
+
     // Mark channel active for stale session cleanup
     if (appId && channel) markChannelActive(appId, channel);
 
     // ─── Session duration limiting ───
-    const agentEntry = getAgent(appId, channel);
     if (agentEntry && agentEntry.maxSessionDuration > 0) {
       const elapsed = (Date.now() - agentEntry.registeredAt) / 1000;
       const remaining = agentEntry.maxSessionDuration - elapsed;
@@ -999,6 +1295,15 @@ function handleRTMPresence(channel, event) {
 
   logger.info(`[Presence] channel=${channel} type=${type} publisher=${publisher}`);
 
+  const runtimeKey = [...channelRuntimeIndex.entries()].find(([key]) => key.endsWith(`:${channel}`))?.[1] || null;
+  const activeEntry = runtimeKey ? agentRegistry.get(runtimeKey) : null;
+  const appId = activeEntry?.appId || null;
+
+  if (type === 'REMOTE_JOIN' && publisher.startsWith('101-') && activeEntry?.meetingMode) {
+    ensureMeetingTranscriptionForEntry(activeEntry);
+    return;
+  }
+
   // Only care about leave/timeout events
   if (type !== 'REMOTE_LEAVE' && type !== 'REMOTE_TIMEOUT') return;
 
@@ -1012,22 +1317,13 @@ function handleRTMPresence(channel, event) {
   const role = isClient ? 'Client' : 'Agent';
   logger.info(`[Presence] ${role} RTM UID ${publisher} left channel ${channel} (${type}) — triggering cleanup`);
 
-  // Find the appId for this channel from the agent registry
-  let appId = null;
-  for (const [key, entry] of agentRegistry.entries()) {
-    if (key.endsWith(`:${channel}`)) {
-      appId = key.split(':')[0];
-      break;
-    }
-  }
-
   if (!appId) {
     logger.warn(`[Presence] No agent registry entry for channel ${channel} — skipping cleanup`);
     return;
   }
 
   // Trigger the same cleanup as /unregister-agent
-  const entry = unregisterAgent(appId, channel);
+  const entry = unregisterAgent(appId, channel, activeEntry?.runtimeKey || '');
   if (!entry) return;
 
   audioSubscriber.stopSession(appId, channel);
@@ -1043,7 +1339,7 @@ function handleRTMPresence(channel, event) {
   // Notify modules (Thymia disconnect, Shen cleanup, etc.)
   for (const mod of modules) {
     if (mod.onAgentUnregistered) {
-      mod.onAgentUnregistered(appId, channel, entry.agentId);
+      mod.onAgentUnregistered(appId, channel, entry.agentId, entry.runtimeKey);
     }
   }
 

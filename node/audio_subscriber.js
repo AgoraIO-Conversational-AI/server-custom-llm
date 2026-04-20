@@ -190,6 +190,19 @@ class AudioSubscriber extends EventEmitter {
   _onChildStatus(session, payload) {
     try {
       const msg = JSON.parse(payload.toString());
+      if (msg.type === 'stream_message') {
+        try {
+          const data = typeof msg.data === 'string' ? Buffer.from(msg.data, 'base64') : Buffer.alloc(0);
+          this.emit('stream_message', session.appId, session.channel, {
+            uid: String(msg.uid || ''),
+            streamId: Number(msg.stream_id || 0),
+            data,
+          });
+        } catch (error) {
+          logger.error(`[child:${session.channel}] failed to parse stream_message`, error);
+        }
+        return;
+      }
       logger.info(`[child:${session.channel}] ${msg.type}: ${msg.status || msg.error || msg.message}`);
       this.emit('status', session.appId, session.channel, msg);
 
