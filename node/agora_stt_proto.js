@@ -79,7 +79,7 @@ function decodeAgoraSttStreamMessage(data) {
   }
 }
 
-function extractFinalTranscriptLine(data) {
+function extractTranscriptLine(data) {
   const msg = decodeAgoraSttStreamMessage(data);
   if (!msg || msg.data_type !== 'transcribe' || !Array.isArray(msg.words) || !msg.words.length) {
     return null;
@@ -92,17 +92,22 @@ function extractFinalTranscriptLine(data) {
   if (!text) return null;
 
   const hasFinal = msg.words.some((word) => word?.isFinal === true) || msg.end_of_segment === true;
-  if (!hasFinal) return null;
-
   return {
     uid: String(msg.uid || ''),
     time: toIsoTime(msg.time),
     text,
     source_lang: msg.lang != null ? String(msg.lang) : '',
+    is_final: hasFinal,
   };
+}
+
+function extractFinalTranscriptLine(data) {
+  const line = extractTranscriptLine(data);
+  return line?.is_final ? line : null;
 }
 
 module.exports = {
   decodeAgoraSttStreamMessage,
+  extractTranscriptLine,
   extractFinalTranscriptLine,
 };

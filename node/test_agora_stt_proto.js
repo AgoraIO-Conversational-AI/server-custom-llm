@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { Root } = require('protobufjs/light');
 
-const { extractFinalTranscriptLine } = require('./agora_stt_proto');
+const { extractTranscriptLine, extractFinalTranscriptLine } = require('./agora_stt_proto');
 
 const root = Root.fromJSON({
   nested: {
@@ -52,4 +52,25 @@ test('extractFinalTranscriptLine decodes final STT stream messages', () => {
   assert.ok(line);
   assert.equal(line.uid, '101');
   assert.equal(line.text, 'Hello world');
+});
+
+test('extractTranscriptLine decodes partial STT stream messages with is_final false', () => {
+  const payload = Text.encode({
+    uid: 103,
+    time: 1776633312000,
+    lang: 1033,
+    data_type: 'transcribe',
+    end_of_segment: false,
+    words: [
+      { text: 'How', isFinal: false },
+      { text: ' are', isFinal: false },
+    ],
+  }).finish();
+
+  const line = extractTranscriptLine(payload);
+  assert.ok(line);
+  assert.equal(line.uid, '103');
+  assert.equal(line.text, 'How are');
+  assert.equal(line.is_final, false);
+  assert.equal(extractFinalTranscriptLine(payload), null);
 });

@@ -24,7 +24,7 @@ const {
   setMeetingTranscript,
   appendMeetingTranscriptLine,
 } = require('./meeting_transcription');
-const { extractFinalTranscriptLine } = require('./agora_stt_proto');
+const { extractTranscriptLine } = require('./agora_stt_proto');
 
 // Load environment variables
 dotenv.config();
@@ -236,12 +236,17 @@ function publishMeetingTranscriptLine(channel, entry, line) {
     const timestamp = Date.parse(line.time || '') || Date.now();
     const payload = {
       object: 'meeting_chat',
-      message_id: `stt:${line.uid}:${line.time || timestamp}:${line.text}`,
+      message_id: `stt:${line.uid}:${line.time || timestamp}`,
       sender_uid: String(line.uid || entry?.guestUid || '101'),
       sender_role: getParticipantRoleForUid(entry, line.uid),
       text: String(line.text || ''),
       timestamp,
+      transcript: true,
+      is_final: Boolean(line.is_final),
     };
+    logger.info(
+      `[TranscriptRTM] runtime=${entry?.runtimeKey || 'unknown'} channel=${channel} uid=${payload.sender_uid} final=${payload.is_final} text=${payload.text.slice(0, 80)}`
+    );
     rtm.sendRTMMessage(channel, JSON.stringify(payload)).catch((error) => {
       logger.error(`[TranscriptLine] failed to publish RTM transcript line: ${error.message}`);
     });
@@ -296,11 +301,15 @@ audioSubscriber.on('stream_message', (appId, channel, message) => {
   try {
     const entry = getAgent(appId, channel);
     if (!entry?.meetingMode) return;
-    const line = extractFinalTranscriptLine(message?.data);
+    const line = extractTranscriptLine(message?.data);
     if (!line) return;
-    logger.info(`[TranscriptLine] runtime=${entry.runtimeKey} uid=${line.uid} text=${line.text.slice(0, 80)}`);
-    appendMeetingTranscriptLine(entry.runtimeKey, line);
-    saveMeetingTranscriptLine(appId, channel, entry, line);
+    logger.info(
+      `[TranscriptLine] runtime=${entry.runtimeKey} uid=${line.uid} final=${Boolean(line.is_final)} text=${line.text.slice(0, 80)}`
+    );
+    if (line.is_final) {
+      appendMeetingTranscriptLine(entry.runtimeKey, line);
+      saveMeetingTranscriptLine(appId, channel, entry, line);
+    }
     publishMeetingTranscriptLine(channel, entry, line);
     for (const mod of modules) {
       if (typeof mod.onTranscriptLine === 'function') {
