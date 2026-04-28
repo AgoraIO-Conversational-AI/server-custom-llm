@@ -8,3 +8,4 @@ go-audio-subscriber/sdk/agora_sdk/
 go-audio-subscriber/sdk/agora_sdk_mac/
 go-audio-subscriber/bin/
 node/data/
+node/agora_cache.db
