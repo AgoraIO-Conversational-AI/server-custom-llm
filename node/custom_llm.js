@@ -320,6 +320,7 @@ audioSubscriber.on('stream_message', (appId, channel, message) => {
             runtimeKey: entry.runtimeKey,
             uid: line.uid,
             text: line.text,
+            isFinal: Boolean(line.is_final),
             sourceLang: line.source_lang,
             guestUid: entry.guestUid || '101',
             hostUid: entry.hostUid || '103',
@@ -441,6 +442,18 @@ app.post('/register-agent', requireAgentServerSecret, (req, res) => {
     throw error;
   }
   logger.info(`[RegisterAgent] prompt_len=${(prompt || '').length} has_tokens=${!!subscriber_token} user_id=${user_id || 'none'}`);
+  logger.info(
+    `[RegisterAgent] meeting_mode=${!!meeting_mode} ` +
+    `meeting_id=${meeting_id || 'none'} ` +
+    `runtime=${runtimeKey} ` +
+    `channel=${channel} ` +
+    `participant_role=${participant_role || 'none'} ` +
+    `stt=${!!transcription_enabled} ` +
+    `audio_biomarkers_enabled=${!!audio_biomarkers_enabled} ` +
+    `video_biomarkers_enabled=${!!video_biomarkers_enabled} ` +
+    `thymia_key=${thymia_api_key ? 'yes' : 'no'} ` +
+    `rtm_uid=${rtm_uid || 'none'}`
+  );
   // Notify modules about the agent registration (include early-start params)
   const earlyParams = {
     user_uid, subscriber_token, rtm_token, rtm_uid, thymia_api_key,
@@ -469,6 +482,10 @@ app.post('/register-agent', requireAgentServerSecret, (req, res) => {
       mod.onAgentRegistered(app_id, channel, resolvedAgentId, auth_header, agent_endpoint, prompt, earlyParams);
     }
   }
+  logger.info(
+    `[RegisterAgent] modules_notified=${modules.length} ` +
+    `runtime=${runtimeKey} channel=${channel}`
+  );
   if (meeting_mode && transcription_enabled) {
     startMeetingTranscription(
       {
@@ -490,6 +507,10 @@ app.post('/register-agent', requireAgentServerSecret, (req, res) => {
       logger.error(`[RegisterAgent] failed to start meeting transcription: ${error.message}`);
     });
   }
+  logger.info(
+    `[RegisterAgent] ready runtime=${runtimeKey} channel=${channel} ` +
+    `transcription_bot_uid=${transcription_bot_uid || 'none'}`
+  );
   res.json({ success: true, key: runtimeKey, agent_id: resolvedAgentId, meeting_runtime_key: runtimeKey });
 });
 
