@@ -97,5 +97,5 @@ Followed immediately by raw PCM bytes.
 
 ## Related Deep Dives
 
-- [thymia_sentinel](deep_dives/thymia_sentinel.md) — Full Sentinel protocol specification
-- [go_audio_ipc](deep_dives/go_audio_ipc.md) — Complete IPC protocol details
+- [thymia_sentinel](L2/thymia_sentinel.md) — Full Sentinel protocol specification
+- [go_audio_ipc](L2/go_audio_ipc.md) — Complete IPC protocol details

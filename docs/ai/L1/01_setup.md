@@ -54,4 +54,4 @@ The binary is output to `go-audio-subscriber/bin/audio_subscriber`.
 
 ## Related Deep Dives
 
-- None
+- [L2/go_audio_ipc.md](L2/go_audio_ipc.md)

@@ -1,4 +1,4 @@
-# Deep Dives Index
+# L2 Deep Dive Index
 
 L2 deep dives for topics that need more detail than L1 provides.
 

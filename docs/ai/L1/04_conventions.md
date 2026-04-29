@@ -53,4 +53,4 @@ Go modules log to stderr (parent captures via child process stderr pipe).
 
 ## Related Deep Dives
 
-- [go_audio_ipc](deep_dives/go_audio_ipc.md) — Full IPC protocol specification
+- [go_audio_ipc](L2/go_audio_ipc.md) — Full IPC protocol specification

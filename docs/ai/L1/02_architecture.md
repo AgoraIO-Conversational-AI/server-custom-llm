@@ -57,5 +57,5 @@ Agora ConvoAI Engine
 
 ## Related Deep Dives
 
-- [go_audio_ipc](deep_dives/go_audio_ipc.md) — Go-Node.js IPC binary framing protocol
-- [thymia_sentinel](deep_dives/thymia_sentinel.md) — Thymia Sentinel WebSocket protocol
+- [go_audio_ipc](L2/go_audio_ipc.md) — Go-Node.js IPC binary framing protocol
+- [thymia_sentinel](L2/thymia_sentinel.md) — Thymia Sentinel WebSocket protocol

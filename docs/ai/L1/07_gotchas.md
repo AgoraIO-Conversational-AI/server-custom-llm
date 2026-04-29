@@ -56,4 +56,4 @@
 
 ## Related Deep Dives
 
-- [go_audio_ipc](deep_dives/go_audio_ipc.md) — Process lifecycle and crash recovery details
+- [go_audio_ipc](L2/go_audio_ipc.md) — Process lifecycle and crash recovery details
