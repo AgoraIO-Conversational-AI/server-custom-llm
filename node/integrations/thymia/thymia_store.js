@@ -10,6 +10,11 @@ const logger = {
   debug: (message) => console.log(`DEBUG: ${message}`),
   error: (message, error) => console.error(`ERROR: ${message}`, error),
 };
+const {
+  getActiveSafetyPolicies,
+  hasActiveCustomSafetyPolicy,
+  isConfiguredCustomSafetyPolicy,
+} = require('./thymia_policy_config');
 
 const CLEANUP_INTERVAL = 3600 * 1000; // 1 hour
 const MAX_AGE = 86400 * 1000; // 24 hours
@@ -88,9 +93,14 @@ function getOrCreate(appId, channel) {
  */
 function updateFromPolicyResult(appId, channel, result) {
   const data = getOrCreate(appId, channel);
-  const inner = result.result || {};
+  const inner = (result.result && typeof result.result === 'object')
+    ? result.result
+    : {};
+  const payload = (inner.response && typeof inner.response === 'object')
+    ? inner.response
+    : inner;
 
-  const biomarkers = inner.biomarkers || inner.biomarker_summary;
+  const biomarkers = payload.biomarkers || payload.biomarker_summary;
   if (result.policy === 'passthrough' && biomarkers) {
     const b = biomarkers;
 
@@ -114,11 +124,17 @@ function updateFromPolicyResult(appId, channel, result) {
     if (b.severity !== undefined) data.clinical.severity = b.severity;
   }
 
-  // Safety analysis — also extract biomarkers if present
-  // API returns policy:"safety_analysis" + policy_name:"agora_safety_analysis"
-  const isSafety = result.policy_name === 'agora_safety_analysis' || result.policy === 'safety_analysis';
+  // Safety analysis — also extract biomarkers if present.
+  // Accept the custom safety policy when it is actually active. Also keep
+  // accepting the default Agora safety policy whenever it remains active so a
+  // missing prompt file does not silently drop all stored safety state.
+  const policyName = result.policy_name || result.policy || '';
+  const activeSafetyPolicies = getActiveSafetyPolicies(logger);
+  const isSafety = activeSafetyPolicies.has(policyName);
+  const customSafetyActive = hasActiveCustomSafetyPolicy(logger);
+  const isAuthoritativeSafety = isConfiguredCustomSafetyPolicy(policyName) || !customSafetyActive;
   if (isSafety) {
-    const safeBio = inner.biomarkers || inner.biomarker_summary;
+    const safeBio = payload.biomarkers || payload.biomarker_summary;
     if (safeBio) {
       for (const [name, value] of Object.entries(safeBio)) {
         if (typeof value === 'number') {
@@ -132,11 +148,14 @@ function updateFromPolicyResult(appId, channel, result) {
       if (safeBio.low_self_esteem !== undefined) data.wellness.low_self_esteem = safeBio.low_self_esteem;
     }
   }
-  if (isSafety) {
-    const nextLevel = inner.level !== undefined ? inner.level : data.safety.level;
-    const nextAlert = inner.alert || false;
-    const nextConcerns = inner.concerns || [];
-    const nextActions = inner.recommended_actions || data.safety.recommended_actions;
+  if (isSafety && isAuthoritativeSafety) {
+    const classification = (payload.classification && typeof payload.classification === 'object')
+      ? payload.classification
+      : payload;
+    const nextLevel = classification.level !== undefined ? classification.level : data.safety.level;
+    const nextAlert = classification.alert || false;
+    const nextConcerns = classification.concerns || [];
+    const nextActions = classification.recommended_actions || data.safety.recommended_actions;
 
     data.safety.level = nextLevel;
     data.safety.alert = nextAlert;
@@ -159,6 +178,14 @@ function updateFromPolicyResult(appId, channel, result) {
       data.safety.highest_concerns = nextConcerns;
       data.safety.highest_recommended_actions = nextActions;
     }
+
+    if (isConfiguredCustomSafetyPolicy(policyName)) {
+      data.safety.active_policy = policyName;
+    } else if (!data.safety.active_policy) {
+      data.safety.active_policy = policyName;
+    }
+  } else if (isSafety && !data.safety.active_policy) {
+    data.safety.active_policy = policyName;
   }
 
   data.resultsCount++;

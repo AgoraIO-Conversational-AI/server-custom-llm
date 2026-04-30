@@ -6,3 +6,4 @@ L2 deep dives for topics that need more detail than L1 provides.
 |------|-------|-------------|
 | [thymia_sentinel.md](thymia_sentinel.md) | Thymia Sentinel WebSocket protocol | Modifying the Thymia integration or debugging biomarker analysis |
 | [go_audio_ipc.md](go_audio_ipc.md) | Go-Node.js IPC binary framing protocol | Modifying audio pipeline, debugging child process, or adding new IPC commands |
+| [mindfix_crisis_escalation.md](mindfix_crisis_escalation.md) | AI-human same-channel PSTN escalation | Debugging crisis dialing, suppression, or session-id linkage |

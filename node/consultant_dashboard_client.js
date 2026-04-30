@@ -10,6 +10,7 @@ function createDashboardConfig(earlyParams) {
     baseUrl,
     sharedSecret,
     clientId,
+    displayName: earlyParams.display_name || '',
     consultantId: earlyParams.consultant_id || '',
     consultantName: earlyParams.consultant_name || '',
     profileName: earlyParams.profile_name || 'default',
@@ -145,9 +146,114 @@ async function postSessionComplete(state, summary, biomarkers, memoryStorageKey,
   }
 }
 
+async function getClientContext(dashboard, logger) {
+  if (!dashboard?.baseUrl || !dashboard?.sharedSecret || !dashboard?.clientId) {
+    throw new Error('dashboard config missing for client context');
+  }
+
+  const url = new URL('/internal/client-context', dashboard.baseUrl);
+  url.searchParams.set('client_id', dashboard.clientId);
+  const pathname = url.pathname;
+  const query = url.searchParams.toString();
+  const headers = buildSignedHeaders(
+    dashboard.sharedSecret,
+    'GET',
+    pathname,
+    query
+  );
+
+  if (logger) {
+    logger.info(`Fetching client-context from ${url.toString()} client_id=${dashboard.clientId}`);
+  }
+
+  const response = await fetch(url.toString(), {
+    method: 'GET',
+    headers,
+    signal: AbortSignal.timeout(8000),
+  });
+
+  const responseText = await response.text();
+  if (!response.ok) {
+    throw new Error(`client context failed: ${response.status} ${responseText}`);
+  }
+  return responseText ? JSON.parse(responseText) : {};
+}
+
+async function postCrisisEscalateInit(dashboard, payloadObject, logger) {
+  if (!dashboard?.baseUrl || !dashboard?.sharedSecret) {
+    throw new Error('dashboard config missing for crisis escalate init');
+  }
+
+  const url = new URL('/internal/crisis-escalate-init', dashboard.baseUrl);
+  const payload = JSON.stringify(payloadObject);
+  const headers = buildSignedHeaders(
+    dashboard.sharedSecret,
+    'POST',
+    url.pathname,
+    payload
+  );
+
+  if (logger) {
+    logger.info(
+      `Posting crisis-escalate-init to ${url.toString()} meeting_id=${payloadObject.meeting_id || 'none'} client_id=${payloadObject.client_id || 'none'}`
+    );
+  }
+
+  const response = await fetch(url.toString(), {
+    method: 'POST',
+    headers,
+    body: payload,
+    signal: AbortSignal.timeout(8000),
+  });
+
+  const responseText = await response.text();
+  if (!response.ok) {
+    throw new Error(`crisis escalate init failed: ${response.status} ${responseText}`);
+  }
+  return responseText ? JSON.parse(responseText) : { ok: true };
+}
+
+async function postCrisisEscalateStatus(dashboard, payloadObject, logger) {
+  if (!dashboard?.baseUrl || !dashboard?.sharedSecret) {
+    throw new Error('dashboard config missing for crisis escalate status');
+  }
+
+  const url = new URL('/internal/crisis-escalate-status', dashboard.baseUrl);
+  const payload = JSON.stringify(payloadObject);
+  const headers = buildSignedHeaders(
+    dashboard.sharedSecret,
+    'POST',
+    url.pathname,
+    payload
+  );
+
+  if (logger) {
+    logger.info(
+      `Posting crisis-escalate-status to ${url.toString()} event_id=${payloadObject.escalation_event_id || 'none'} phase=${payloadObject.phase || 'none'}`
+    );
+  }
+
+  const response = await fetch(url.toString(), {
+    method: 'POST',
+    headers,
+    body: payload,
+    signal: AbortSignal.timeout(8000),
+  });
+
+  const responseText = await response.text();
+  if (!response.ok) {
+    throw new Error(`crisis escalate status failed: ${response.status} ${responseText}`);
+  }
+  return responseText ? JSON.parse(responseText) : { ok: true };
+}
+
 module.exports = {
+  buildSignedHeaders,
   buildSessionCompletePayload,
   createDashboardConfig,
   flattenBiomarkers,
+  getClientContext,
+  postCrisisEscalateInit,
+  postCrisisEscalateStatus,
   postSessionComplete,
 };

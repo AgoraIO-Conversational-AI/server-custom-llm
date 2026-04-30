@@ -64,13 +64,17 @@ const openai = new OpenAI({
 
 // ─── Module registration ───
 
+let crisisModule = null;
 const THYMIA_ENABLED = process.env.THYMIA_ENABLED === 'true';
 const modules = [];
 const audioSubscriber = new AudioSubscriber();
 
 if (THYMIA_ENABLED) {
   const thymiaModule = require('./integrations/thymia/thymia');
-  thymiaModule.init(audioSubscriber, { rtmClient: () => rtmClient });
+  thymiaModule.init(audioSubscriber, {
+    rtmClient: () => rtmClient,
+    onSafetyUpdate: (payload) => crisisModule?.onSafetyUpdate?.(payload),
+  });
   modules.push(thymiaModule);
 }
 
@@ -88,6 +92,11 @@ if (MEMORY_ENABLED) {
   modules.push(memoryModule);
 }
 
+const CRISIS_CALL_ENABLED = process.env.CRISIS_CALL_ENABLED === 'true';
+if (CRISIS_CALL_ENABLED) {
+  crisisModule = require('./integrations/mindfix_crisis/mindfix_crisis');
+}
+
 // Initialize Express app
 const app = express();
 const port = process.env.PORT || 8101;
@@ -99,6 +108,88 @@ const logger = {
   error: (message, error) => console.error(`ERROR: ${message}`, error),
   warn: (message) => console.warn(`WARN: ${message}`),
 };
+
+function recordAssistantUtterance(appId, userId, channel, content, options = {}) {
+  if (!content) return;
+  saveMessage(appId, userId, channel, {
+    role: 'assistant',
+    content,
+  });
+  // skipModuleFanout: persist to the conversation record but do not feed modules
+  // (e.g. Thymia). Used for crisis announcements so they don't pollute the
+  // safety timeline with a synthetic "agent turn" at the moment of escalation.
+  if (options.skipModuleFanout) return;
+  for (const mod of modules) {
+    if (mod.onResponse) mod.onResponse({ appId, userId, channel, content });
+  }
+}
+
+function getSuppressionDirective(appId, channel) {
+  for (const mod of modules) {
+    if (mod.shouldSuppressAssistantReply && mod.shouldSuppressAssistantReply(appId, channel)) {
+      return mod.getSuppressionInstruction ? mod.getSuppressionInstruction(appId, channel) : 'suppressed';
+    }
+  }
+  return '';
+}
+
+function sendSuppressedResponse(res, model, stream) {
+  if (stream) {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.write('data: [DONE]\n\n');
+    res.end();
+    return;
+  }
+
+  res.json({
+    id: `suppressed_${Date.now()}`,
+    object: 'chat.completion',
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [
+      {
+        index: 0,
+        message: { role: 'assistant', content: '' },
+        finish_reason: 'stop',
+      },
+    ],
+  });
+}
+
+if (crisisModule) {
+  const { speakWithAgentCredentials } = require('./agent_speaker');
+  crisisModule.init(audioSubscriber, {
+    recordAssistantUtterance,
+    speakWithAgent: async (appId, channel, text, priority = 'APPEND') => {
+      const agent = getAgent(appId, channel);
+      if (!agent) {
+        return { ok: false, skipped: true, reason: 'missing_agent' };
+      }
+      return speakWithAgentCredentials({
+        appId,
+        agentId: agent.agentId,
+        authHeader: agent.authHeader,
+        agentEndpoint: agent.agentEndpoint,
+        text,
+        priority,
+        logger,
+      });
+    },
+    getLatestUserUtterance: (appId, userId, channel) => {
+      const messages = getMessages(appId, userId, channel);
+      for (let i = messages.length - 1; i >= 0; i -= 1) {
+        const msg = messages[i];
+        if (msg?.role === 'user' && typeof msg.content === 'string' && msg.content.trim()) {
+          return msg.content.trim();
+        }
+      }
+      return '';
+    },
+  });
+  modules.push(crisisModule);
+}
 
 function requireAgentServerSecret(req, res, next) {
   if (!AGENT_SERVER_SHARED_SECRET) return next();
@@ -410,6 +501,7 @@ app.post('/register-agent', requireAgentServerSecret, (req, res) => {
           transcription_language, transcription_bot_uid, transcription_bot_token,
           audio_biomarkers_enabled, video_biomarkers_enabled } = req.body;
   const resolvedAgentId = agent_id || (meeting_mode ? `meeting:${meeting_id || channel}` : '');
+  const sessionId = (req.body.session_id || '').trim() || randomUUID();
   if (!app_id || !channel || !resolvedAgentId) {
     logger.error('[RegisterAgent] missing required fields: app_id, channel, agent_id');
     return res.status(400).json({ error: 'Missing app_id, channel, or agent_id' });
@@ -462,6 +554,7 @@ app.post('/register-agent', requireAgentServerSecret, (req, res) => {
     consultant_dashboard_url, consultant_dashboard_shared_secret,
     profile_name, meeting_mode, meeting_id, participant_role,
     host_uid, guest_uid, meeting_context_url, meeting_shared_secret,
+    session_id: sessionId,
     meeting_runtime_key: runtimeKey,
     audio_biomarkers_enabled, video_biomarkers_enabled,
     transcription_enabled, transcription_provider, transcription_language,
@@ -820,6 +913,12 @@ app.post('/chat/completions', async (req, res) => {
       channel,
       requestMessages
     );
+
+    const suppressionDirective = getSuppressionDirective(appId, channel);
+    if (suppressionDirective) {
+      logger.info(`[Suppression] appId=${appId} channel=${channel} reason="${suppressionDirective}"`);
+      return sendSuppressedResponse(res, model, stream);
+    }
 
     // Inject system messages from modules (e.g. biomarker context)
     // Insert after the first system message (the prompt) so the LLM has context

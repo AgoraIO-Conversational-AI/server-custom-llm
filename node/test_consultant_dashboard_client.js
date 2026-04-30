@@ -2,9 +2,13 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
+  buildSignedHeaders,
   buildSessionCompletePayload,
   createDashboardConfig,
   flattenBiomarkers,
+  getClientContext,
+  postCrisisEscalateInit,
+  postCrisisEscalateStatus,
   postSessionComplete,
 } = require('./consultant_dashboard_client');
 
@@ -190,6 +194,109 @@ test('postSessionComplete sends a timeout signal with the dashboard request', as
 
     assert.deepEqual(result, { ok: true });
     assert.ok(capturedSignal);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('getClientContext sends a signed GET request and parses response', async () => {
+  const originalFetch = global.fetch;
+  let captured = null;
+  global.fetch = async (url, options) => {
+    captured = { url, options };
+    return {
+      ok: true,
+      text: async () => '{"client_id":"client-123","ai_session_count":4,"ai_personal_summary":{"brief_overview":"Recurring AI themes."}}',
+    };
+  };
+
+  try {
+    const result = await getClientContext(
+      {
+        baseUrl: 'http://127.0.0.1:8090',
+        sharedSecret: 'secret',
+        clientId: 'client-123',
+      }
+    );
+
+    assert.equal(result.client_id, 'client-123');
+    assert.equal(result.ai_session_count, 4);
+    assert.equal(result.ai_personal_summary.brief_overview, 'Recurring AI themes.');
+    assert.equal(captured.options.method, 'GET');
+    assert.ok(captured.options.headers['X-Consultant-Signature']);
+    assert.match(captured.url, /client_id=client-123/);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('buildSignedHeaders returns consultant signing headers', () => {
+  const headers = buildSignedHeaders('secret', 'POST', '/internal/crisis-escalate-init', '{"ok":true}');
+  assert.ok(headers['X-Consultant-Timestamp']);
+  assert.ok(headers['X-Consultant-Signature']);
+  assert.equal(headers['Content-Type'], 'application/json');
+});
+
+test('postCrisisEscalateInit posts signed payload and parses response', async () => {
+  const originalFetch = global.fetch;
+  let captured = null;
+  global.fetch = async (url, options) => {
+    captured = { url, options };
+    return {
+      ok: true,
+      text: async () => '{"ok":true,"escalate":true,"channel_name":"room_1"}',
+    };
+  };
+
+  try {
+    const result = await postCrisisEscalateInit(
+      {
+        baseUrl: 'http://127.0.0.1:8090',
+        sharedSecret: 'secret',
+      },
+      {
+        meeting_id: 'meeting-1',
+        client_id: 'client-1',
+        level: 3,
+        alert: 'crisis',
+      }
+    );
+
+    assert.equal(result.escalate, true);
+    assert.equal(result.channel_name, 'room_1');
+    assert.equal(captured.options.method, 'POST');
+    assert.ok(captured.options.headers['X-Consultant-Signature']);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('postCrisisEscalateStatus posts signed payload and parses response', async () => {
+  const originalFetch = global.fetch;
+  let captured = null;
+  global.fetch = async (url, options) => {
+    captured = { url, options };
+    return {
+      ok: true,
+      text: async () => '{"ok":true,"phase":"answered"}',
+    };
+  };
+
+  try {
+    const result = await postCrisisEscalateStatus(
+      {
+        baseUrl: 'http://127.0.0.1:8090',
+        sharedSecret: 'secret',
+      },
+      {
+        escalation_event_id: 'esc-1',
+        phase: 'answered',
+      }
+    );
+
+    assert.equal(result.phase, 'answered');
+    assert.equal(captured.options.method, 'POST');
+    assert.ok(captured.options.headers['X-Consultant-Signature']);
   } finally {
     global.fetch = originalFetch;
   }

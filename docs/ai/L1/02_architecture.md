@@ -37,6 +37,8 @@ Agora ConvoAI Engine
 5. Node.js routes PCM to ThymiaClient WebSocket for real-time voice biomarker analysis
 6. Thymia returns PolicyResult with biomarker scores, stored in thymia_store
 7. LLM can call `get_wellness_metrics` tool to access biomarker data
+8. The memory module can load prior encrypted AI-session summaries and later persist a new one on unregister
+9. A MindFix-specific crisis module can trigger same-channel PSTN escalation for AI-human sessions
 
 ## Key Abstractions
 
@@ -44,6 +46,8 @@ Agora ConvoAI Engine
 - **Conversation store**: In-memory per-channel message history with auto-trim
 - **Audio session**: One Go child process + one Thymia WebSocket per channel
 - **Frame protocol**: Binary IPC between Go and Node.js (type + length + payload)
+- **Memory module**: Optional encrypted AI-session continuity layer
+- **MindFix crisis module**: AI-human-only escalation orchestrator
 
 ## Tech Stack
 
@@ -54,8 +58,10 @@ Agora ConvoAI Engine
 | Audio subscriber | Go + CGO | Agora RTC SDK audio capture |
 | Voice biomarkers | WebSocket (`ws`) | Thymia Sentinel streaming |
 | Messaging | RTM (optional) | Text channel integration |
+| Crisis escalation | SIP-CM HTTP API | Same-channel PSTN bridge for AI-human escalation |
 
 ## Related Deep Dives
 
 - [go_audio_ipc](L2/go_audio_ipc.md) — Go-Node.js IPC binary framing protocol
 - [thymia_sentinel](L2/thymia_sentinel.md) — Thymia Sentinel WebSocket protocol
+- [mindfix_crisis_escalation](L2/mindfix_crisis_escalation.md) — AI-human PSTN escalation flow

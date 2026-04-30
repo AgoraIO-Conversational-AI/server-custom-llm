@@ -29,6 +29,7 @@ Treat these as sensitive:
 - `AGORA_APP_ID`
 - `THYMIA_API_KEY`
 - `ENCRYPTION_KEY`
+- `AGORA_SIPCM_AUTH`
 - any dashboard shared-secret env vars
 
 Do not log raw secrets, bearer tokens, or full signed headers.
@@ -39,6 +40,7 @@ Do not log raw secrets, bearer tokens, or full signed headers.
 - Thymia biomarker payloads are sensitive wellness/clinical signal data
 - RTM biomarker messages are visible to channel participants that subscribe to them
 - local encrypted memory is only protected if `ENCRYPTION_KEY` is configured correctly
+- crisis escalation metadata includes trusted-contact phone numbers and generated escalation text
 
 ## Operational Risks
 
@@ -57,3 +59,4 @@ Do not log raw secrets, bearer tokens, or full signed headers.
 
 - [thymia_sentinel](L2/thymia_sentinel.md) — Sentinel message flow and biomarker protocol
 - [go_audio_ipc](L2/go_audio_ipc.md) — Child-process IPC and audio capture boundaries
+- [mindfix_crisis_escalation](L2/mindfix_crisis_escalation.md) — AI-human PSTN escalation boundaries

@@ -42,6 +42,25 @@
 - On reconnect, the SentinelConfig is re-sent automatically
 - Buffered PCM is NOT re-sent on reconnect (only pre-connection buffer is flushed once)
 
+## Custom Policy Path Misconfiguration
+
+- setting `THYMIA_CUSTOM_POLICY_PROMPT_PATH` does not guarantee the custom policy is active
+- the file must load successfully at runtime
+- the store now falls back to default Agora safety when the prompt file is missing, but the custom policy itself still will not run
+
+## AI-Human Memory Requires Two Flags
+
+- `ENABLE_MEMORY=true` alone does not persist session summaries
+- `ENCRYPTION_KEY` must also be set
+- continuity memory is intentionally disabled for `meetingMode` / human-human sessions
+
+## `node/.env` Is the Restart Source of Truth
+
+- `custom_llm.js` calls `dotenv.config()` from the `node/` cwd
+- storing only the new crisis vars there can accidentally disable Thymia/Shen/memory on the next restart
+- keep the full runtime set together in `server-custom-llm/node/.env`
+- this differs from `consultant_dashboard`, which reads its repo-root `.env`
+
 ## Tool Execution Passes
 
 - The LLM can trigger up to 5 tool execution passes per request
@@ -57,3 +76,4 @@
 ## Related Deep Dives
 
 - [go_audio_ipc](L2/go_audio_ipc.md) — Process lifecycle and crash recovery details
+- [mindfix_crisis_escalation](L2/mindfix_crisis_escalation.md) — Crisis trigger, suppression, and PSTN flow

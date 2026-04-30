@@ -51,6 +51,8 @@ class ThymiaClient {
    * @param {string} [config.language] - BCP 47 language code, default "en"
    * @param {string[]} [config.biomarkers] - e.g. ["helios", "apollo"]
    * @param {string[]} [config.policies] - e.g. ["passthrough", "safety_analysis"]
+   * @param {Object[]} [config.custom_policies] - inline custom policy definitions
+   *   each entry: { policy_name, executor: "custom_prompt", config_json: { prompt, trigger_turns } }
    * @param {number} [config.sample_rate] - Audio sample rate, default 16000
    * @param {string} [config.format] - Audio format, default "pcm16"
    * @param {number} [config.channels] - Audio channels, default 1
@@ -69,13 +71,15 @@ class ThymiaClient {
 
     const sentinelConfig = {
       type: 'CONFIG',
-      api_key: this.apiKey,
       user_label: config.user_label || 'user',
       date_of_birth: config.date_of_birth || undefined,
       birth_sex: birthSex,
       language: config.language || 'en',
       biomarkers: config.biomarkers || (process.env.THYMIA_BIOMARKERS || 'helios,apollo').split(','),
       policies: config.policies || (process.env.THYMIA_POLICIES || 'passthrough,agora_safety_analysis').split(','),
+      custom_policies: Array.isArray(config.custom_policies) && config.custom_policies.length > 0
+        ? config.custom_policies
+        : undefined,
       sample_rate: config.sample_rate || 16000,
       format: config.format || 'pcm16',
       channels: config.channels || 1,
@@ -101,7 +105,9 @@ class ThymiaClient {
     logger.info(`Connecting to ${this.wsUrl}`);
 
     try {
-      this.ws = new WebSocket(this.wsUrl);
+      this.ws = new WebSocket(this.wsUrl, {
+        headers: { 'X-Api-Key': this.apiKey },
+      });
     } catch (err) {
       logger.error('WebSocket creation failed:', err);
       this._scheduleReconnect();
@@ -117,7 +123,21 @@ class ThymiaClient {
       const configJson = JSON.stringify(config);
       this.ws.send(configJson);
       this.configSent = true;
-      logger.info(`Sent SentinelConfig: ${configJson}`);
+      // Redact custom prompts in the log to avoid flooding stdout with large prompt text
+      const redacted = { ...config };
+      if (Array.isArray(redacted.custom_policies)) {
+        redacted.custom_policies = redacted.custom_policies.map((p) => ({
+          policy_name: p?.policy_name,
+          executor: p?.executor,
+          config_json: p?.config_json
+            ? {
+                trigger_turns: p.config_json.trigger_turns,
+                prompt_chars: typeof p.config_json.prompt === 'string' ? p.config_json.prompt.length : 0,
+              }
+            : undefined,
+        }));
+      }
+      logger.info(`Sent SentinelConfig: ${JSON.stringify(redacted)}`);
 
       if (this.onStatus) {
         this.onStatus('connected');

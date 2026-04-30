@@ -305,19 +305,23 @@ function loadSessionSummaries(userIdHash) {
     .sort(); // chronological by filename (ISO timestamp)
 
   const summaries = [];
-  for (const file of files.slice(-MAX_HISTORY_SESSIONS)) {
+  let skipped = 0;
+  for (const file of files.slice().reverse()) {
     try {
       const buf = fs.readFileSync(path.join(dir, file));
       const data = decryptJSON(buf, ENCRYPTION_KEY, userIdHash);
-      summaries.push({
+      summaries.unshift({
         date: file.replace('.enc', '').replace(/T/, ' ').replace(/Z$/, ' UTC'),
         summary: data.summary || data,
         biomarkers: data.biomarkers || null,
       });
+      if (summaries.length >= MAX_HISTORY_SESSIONS) break;
     } catch (err) {
+      skipped++;
       logger.error(`Failed to decrypt session ${file}: ${err.message}`);
     }
   }
+  logger.info(`Loaded ${summaries.length}/${MAX_HISTORY_SESSIONS} decryptable session summaries for user ${userIdHash.substring(0, 8)}... (skipped=${skipped})`);
   return summaries;
 }
 
@@ -349,6 +353,47 @@ function buildInjection(summaries) {
     lines.push('');
   });
   return lines.join('\n');
+}
+
+function buildDashboardSummaryInjection(ctx) {
+  const aiSummary = ctx?.ai_personal_summary;
+  const lines = [];
+  const profileBits = [];
+  const displayName = normalizeSummaryText(ctx?.display_name || '');
+  if (displayName) profileBits.push(`Name: ${displayName}`);
+  if (ctx?.year_of_birth) profileBits.push(`Year of birth: ${ctx.year_of_birth}`);
+  if (ctx?.sex) profileBits.push(`Sex: ${String(ctx.sex).toLowerCase()}`);
+  if (profileBits.length) {
+    lines.push('## Client Profile\n');
+    lines.push(profileBits.join(' · '), '');
+  }
+  if (!aiSummary || typeof aiSummary !== 'object') return lines.join('\n').trim();
+  lines.push('## Client Personal Summary (AI Sessions)\n');
+  const brief = normalizeSummaryText(aiSummary.brief_overview || aiSummary.overview || '');
+  const full = normalizeSummaryText(aiSummary.full_summary || '');
+  const keyFacts = Array.isArray(aiSummary.key_facts) ? aiSummary.key_facts.filter((item) => typeof item === 'string' && item.trim()) : [];
+  const openThreads = Array.isArray(aiSummary.open_threads) ? aiSummary.open_threads.filter((item) => typeof item === 'string' && item.trim()) : [];
+  if (brief) lines.push(brief, '');
+  if (full) lines.push(full, '');
+  if (keyFacts.length) {
+    lines.push('Key facts:');
+    keyFacts.slice(0, 5).forEach((item) => lines.push(`- ${item}`));
+    lines.push('');
+  }
+  if (openThreads.length) {
+    lines.push('Open threads:');
+    openThreads.slice(0, 5).forEach((item) => lines.push(`- ${item}`));
+    lines.push('');
+  }
+  const aiCount = Number(ctx?.ai_session_count || 0);
+  if (aiCount > 0) {
+    lines.push(`AI session count: ${aiCount}`);
+  }
+  return lines.join('\n').trim();
+}
+
+function mergeInjections(dashboardInjection, historyInjection) {
+  return [dashboardInjection, historyInjection].filter(Boolean).join('\n\n').trim() || null;
 }
 
 // ─── Summarization ───
@@ -392,7 +437,7 @@ async function summarizeConversation(messages, cachedApiKey, biomarkers) {
             + '{"consultant_summary":{"brief_overview":"...","full_summary":"...","biomarker_summary":"...","risk_overview":"...","follow_up":"..."}}. '
             + 'Rules: '
             + '1) consultant_summary.brief_overview is a short consultant-facing summary for quick scanning, 1-2 sentences. '
-            + '2) consultant_summary.full_summary is a fuller consultant-facing summary and will also be reused as AI continuity for future sessions; include broad themes, what helped, unresolved threads, and follow-up needs, while avoiding unnecessary identifying event detail. '
+            + '2) consultant_summary.full_summary is a fuller consultant-facing summary and will also be reused as AI continuity for future sessions; include broad themes, what helped, unresolved threads, follow-up needs, and any stable personal facts or preferences that are likely to matter for continuity in later sessions. '
             + '3) consultant_summary.biomarker_summary should mention the main biomarker takeaways only when supported by the provided biomarker context. '
             + '4) consultant_summary.risk_overview must mention the worst safety state reached during the call when safety data is present, even if the session later de-escalated. '
             + '5) consultant_summary.follow_up should say what a consultant should monitor or revisit next. '
@@ -493,14 +538,32 @@ module.exports = {
       channel,
       runtimeKey,
       injection,
+      historyInjection: injection,
+      dashboardInjection: '',
       biomarkers: { voice: {}, vitals: {} },
       startedAt: new Date().toISOString(),
       startedAtMs: Date.now(),
-      sessionId: crypto.randomUUID(),
+      sessionId: earlyParams?.session_id || crypto.randomUUID(),
       shouldPersistMemory,
       dashboard,
       meetingMode,
     });
+
+    if (dashboard && !meetingMode) {
+      dashboardClient.getClientContext(dashboard, logger)
+        .then((contextPayload) => {
+          const state = channelState.get(channel);
+          if (!state) return;
+          state.dashboardInjection = buildDashboardSummaryInjection(contextPayload);
+          state.injection = mergeInjections(state.dashboardInjection, state.historyInjection);
+          logger.info(
+            `Loaded dashboard AI summary for channel=${channel} ai_sessions=${contextPayload.ai_session_count || 0} injection_chars=${(state.dashboardInjection || '').length}`
+          );
+        })
+        .catch((err) => {
+          logger.error(`Failed to load dashboard client context for channel=${channel}: ${err.message}`);
+        });
+    }
   },
 
   getSystemInjection(appId, channel) {
@@ -517,8 +580,15 @@ module.exports = {
     if (!existing && ctx.userId && ctx.userId !== 'anonymous' && ENCRYPTION_KEY) {
       const userId = ctx.userId;
       const summaries = loadSessionSummaries(userId);
-      const injection = summaries.length > 0 ? buildInjection(summaries) : null;
-      channelState.set(ctx.channel, { userId, appId: ctx.appId, injection, biomarkers: { voice: {}, vitals: {} } });
+      const historyInjection = summaries.length > 0 ? buildInjection(summaries) : null;
+      channelState.set(ctx.channel, {
+        userId,
+        appId: ctx.appId,
+        injection: historyInjection,
+        historyInjection,
+        dashboardInjection: '',
+        biomarkers: { voice: {}, vitals: {} },
+      });
     }
 
     // Cache LLM API key from request headers (needed for post-session summarization)
