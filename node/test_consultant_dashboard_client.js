@@ -71,6 +71,14 @@ test('buildSessionCompletePayload produces dashboard-compatible structure', () =
       consultantId: 'consultant-456',
       profileName: 'therapy',
     },
+    dashboardContext: {
+      ai_personal_summary: {
+        key_point_summary: {
+          headline: 'Existing Client Key Point Summary',
+          body: 'Existing body',
+        },
+      },
+    },
   };
 
   const payload = buildSessionCompletePayload(
@@ -123,6 +131,43 @@ test('buildSessionCompletePayload produces dashboard-compatible structure', () =
   assert.equal(payload.ai_personal_summary.key_point_summary.headline, 'Client Key Point Summary - AI Sessions');
   assert.equal(payload.transcript.provider, 'agora_stt');
   assert.equal(payload.transcript.text, 'Client discussed stress at work.');
+});
+
+test('buildSessionCompletePayload preserves existing client KPS when dashboard context is unavailable', () => {
+  const payload = buildSessionCompletePayload(
+    {
+      channel: 'demo-channel',
+      sessionId: 'sess-no-ctx',
+      startedAt: '2026-04-13T18:00:00Z',
+      startedAtMs: Date.now() - 300000,
+      dashboard: {
+        clientId: 'client-123',
+        consultantId: 'consultant-456',
+        profileName: 'therapy',
+        meetingMode: false,
+      },
+      dashboardContext: null,
+    },
+    {
+      dashboardSummary: {
+        key_point_summary: { headline: 'Session Key Point Summary', body: 'Body' },
+        brief_overview: 'Session Key Point Summary',
+        full_summary: 'Body',
+      },
+      clientKeyPointSummary: {
+        key_point_summary: {
+          headline: 'Client Key Point Summary - AI Sessions',
+          body: 'Should not be sent without dashboard context.',
+        },
+      },
+    },
+    { voice: {}, vitals: {} },
+    '',
+    null
+  );
+
+  assert.equal(payload.ai_personal_summary, null);
+  assert.equal(payload.human_personal_summary, null);
 });
 
 test('buildSessionCompletePayload includes meeting metadata when present', () => {

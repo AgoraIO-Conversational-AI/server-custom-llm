@@ -96,10 +96,11 @@ function buildSessionCompletePayload(state, summary, biomarkers, memoryStorageKe
   const summaryBundle = summary && typeof summary === 'object' && !Array.isArray(summary) && summary.dashboardSummary
     ? summary
     : { dashboardSummary: summary };
-  const aiPersonalSummary = !state.dashboard.meetingMode
+  const hasDashboardContext = !!state.dashboardContext;
+  const aiPersonalSummary = hasDashboardContext && !state.dashboard.meetingMode
     ? normalizeClientKeyPointSummary(summaryBundle.clientKeyPointSummary)
     : null;
-  const humanPersonalSummary = state.dashboard.meetingMode
+  const humanPersonalSummary = hasDashboardContext && state.dashboard.meetingMode
     ? normalizeClientKeyPointSummary(summaryBundle.clientKeyPointSummary)
     : null;
   return {

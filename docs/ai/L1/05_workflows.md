@@ -105,6 +105,28 @@ npm start
 5. Check logs for:
    - `Loaded N session(s) for user_id=...`
 
+## Validate Dashboard KPS Flow
+
+1. Confirm the session has dashboard config:
+   - `consultant_dashboard_url`
+   - `consultant_dashboard_shared_secret`
+   - `client_id`
+2. Start an AI-human session and check logs for:
+   - `Fetching client-context`
+   - `Loaded dashboard AI summary`
+3. Confirm the injected context includes:
+   - client profile
+   - notes
+   - direction
+   - `Client Key Point Summary - AI Sessions`
+4. End the session and check logs for:
+   - `Generated session summaries`
+   - `Posting session-complete`
+5. Confirm the posted payload now carries:
+   - `summary.key_point_summary`
+   - `ai_personal_summary` or `human_personal_summary`
+   - biomarker aggregates including safety-level stats
+
 ## Stage Manual PSTN Validation
 
 1. AI-human session with no escalation phone:

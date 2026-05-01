@@ -35,6 +35,22 @@ Streaming audio response (SSE with base64 PCM chunks).
 
 Returns `{ "message": "pong" }`.
 
+## Dashboard Contracts Used By This Service
+
+The MindFix memory/summarization path depends on two signed dashboard contracts:
+
+- `GET /internal/client-context`
+  - returns demographics, notes, direction, latest summary, biomarker baseline, and the stored AI/human client key point summaries
+- `POST /internal/session-complete`
+  - receives the final session summary, updated client key point summary, biomarker aggregates, transcript, and memory key
+
+Current ownership rule:
+
+- this service generates:
+  - `summary.key_point_summary`
+  - `ai_personal_summary` or `human_personal_summary`
+- the dashboard stores and renders them
+
 ## Go-Node.js IPC Protocol
 
 ### stdin (Node → Go): Newline-delimited JSON

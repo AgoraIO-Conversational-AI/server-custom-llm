@@ -54,6 +54,16 @@
 - `ENCRYPTION_KEY` must also be set
 - continuity memory is intentionally disabled for `meetingMode` / human-human sessions
 
+## Dashboard KPS Is Now Part of Prompt Injection
+
+- for MindFix AI-human sessions, the prompt injection is no longer only local disk memory
+- it also includes dashboard-provided:
+  - client demographics
+  - notes
+  - direction
+  - `Client Key Point Summary - AI Sessions`
+- if `client-context` fails, AI continuity falls back to local encrypted session history only
+
 ## `node/.env` Is the Restart Source of Truth
 
 - `custom_llm.js` calls `dotenv.config()` from the `node/` cwd
