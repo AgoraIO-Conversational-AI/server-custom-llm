@@ -76,16 +76,29 @@ test('buildSessionCompletePayload produces dashboard-compatible structure', () =
   const payload = buildSessionCompletePayload(
     state,
     {
-      brief_overview: 'Generalized session summary.',
-      full_summary: 'Longer consultant-readable summary with continuity details.',
-      biomarker_summary: 'Elevated stress with increased heart rate.',
-      risk_overview: 'Highest safety level reached during the call was 3.',
-      follow_up: 'Review safety plan and confirm external support.',
-      source: 'custom-llm',
+      dashboardSummary: {
+        key_point_summary: {
+          headline: 'Session Key Point Summary',
+          body: 'Longer consultant-readable summary with continuity details.',
+        },
+        brief_overview: 'Generalized session summary.',
+        full_summary: 'Longer consultant-readable summary with continuity details.',
+        biomarker_summary: 'Elevated stress with increased heart rate.',
+        risk_overview: 'Highest safety level reached during the call was 3.',
+        follow_up: 'Review safety plan and confirm external support.',
+        source: 'custom-llm',
+      },
+      clientKeyPointSummary: {
+        key_point_summary: {
+          headline: 'Client Key Point Summary - AI Sessions',
+          body: 'Recurring stress and work pressure across recent AI sessions.',
+        },
+      },
     },
     {
       voice: { stress: { avg: 0.72, count: 4, min: 0.5, max: 0.9 } },
       vitals: { heart_rate_bpm: { avg: 84.1, count: 8, min: 74, max: 96 } },
+      safety: { level_stats: { avg: 2.25, max: 3, count: 4, min: 1 } },
     },
     'users/u123/sessions/abc.enc',
     { provider: 'agora_stt', text: 'Client discussed stress at work.' }
@@ -99,11 +112,15 @@ test('buildSessionCompletePayload produces dashboard-compatible structure', () =
   assert.equal(payload.summary.brief_overview, 'Generalized session summary.');
   assert.equal(payload.summary.overview, 'Generalized session summary.');
   assert.equal(payload.summary.full_summary, 'Longer consultant-readable summary with continuity details.');
+  assert.equal(payload.summary.key_point_summary.headline, 'Session Key Point Summary');
+  assert.equal(payload.summary.key_point_summary.body, 'Longer consultant-readable summary with continuity details.');
   assert.equal(payload.summary.biomarker_summary, 'Elevated stress with increased heart rate.');
   assert.equal(payload.summary.risk_overview, 'Highest safety level reached during the call was 3.');
   assert.equal(payload.summary.follow_up, 'Review safety plan and confirm external support.');
   assert.equal(payload.biomarkers.averages.stress, 0.72);
   assert.equal(payload.biomarkers.averages.heart_rate_bpm, 84.1);
+  assert.equal(payload.biomarkers.averages.safety_level, 2.25);
+  assert.equal(payload.ai_personal_summary.key_point_summary.headline, 'Client Key Point Summary - AI Sessions');
   assert.equal(payload.transcript.provider, 'agora_stt');
   assert.equal(payload.transcript.text, 'Client discussed stress at work.');
 });
@@ -155,6 +172,8 @@ test('buildSessionCompletePayload preserves backward compatibility for string su
   assert.equal(payload.summary.brief_overview, 'Legacy summary string.');
   assert.equal(payload.summary.overview, 'Legacy summary string.');
   assert.equal(payload.summary.full_summary, 'Legacy summary string.');
+  assert.equal(payload.summary.key_point_summary.headline, 'Legacy summary string.');
+  assert.equal(payload.summary.key_point_summary.body, 'Legacy summary string.');
   assert.equal(payload.summary.biomarker_summary, '');
   assert.equal(payload.summary.risk_overview, '');
   assert.equal(payload.summary.follow_up, '');
@@ -206,7 +225,7 @@ test('getClientContext sends a signed GET request and parses response', async ()
     captured = { url, options };
     return {
       ok: true,
-      text: async () => '{"client_id":"client-123","ai_session_count":4,"ai_personal_summary":{"brief_overview":"Recurring AI themes."}}',
+      text: async () => '{"client_id":"client-123","ai_session_count":4,"ai_personal_summary":{"key_point_summary":{"headline":"Client Key Point Summary - AI Sessions","body":"Recurring AI themes."}}}',
     };
   };
 
@@ -221,7 +240,7 @@ test('getClientContext sends a signed GET request and parses response', async ()
 
     assert.equal(result.client_id, 'client-123');
     assert.equal(result.ai_session_count, 4);
-    assert.equal(result.ai_personal_summary.brief_overview, 'Recurring AI themes.');
+    assert.equal(result.ai_personal_summary.key_point_summary.body, 'Recurring AI themes.');
     assert.equal(captured.options.method, 'GET');
     assert.ok(captured.options.headers['X-Consultant-Signature']);
     assert.match(captured.url, /client_id=client-123/);

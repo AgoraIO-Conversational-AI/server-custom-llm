@@ -30,6 +30,10 @@ function flattenBiomarkers(biomarkers) {
       }
     }
   }
+  const safetyLevelAvg = biomarkers?.safety?.level_stats?.avg;
+  if (typeof safetyLevelAvg === 'number' && !Number.isNaN(safetyLevelAvg)) {
+    averages.safety_level = safetyLevelAvg;
+  }
   return averages;
 }
 
@@ -37,7 +41,13 @@ function normalizeDashboardSummary(summary) {
   if (summary && typeof summary === 'object' && !Array.isArray(summary)) {
     const briefOverview = summary.brief_overview || summary.overview || '';
     const fullSummary = summary.full_summary || summary.overview || '';
+    const headline = summary.key_point_summary?.headline || briefOverview;
+    const body = summary.key_point_summary?.body || fullSummary;
     return {
+      key_point_summary: {
+        headline,
+        body,
+      },
       brief_overview: briefOverview,
       overview: briefOverview,
       full_summary: fullSummary,
@@ -49,6 +59,10 @@ function normalizeDashboardSummary(summary) {
   }
 
   return {
+    key_point_summary: {
+      headline: typeof summary === 'string' ? summary : '',
+      body: typeof summary === 'string' ? summary : '',
+    },
     brief_overview: typeof summary === 'string' ? summary : '',
     overview: typeof summary === 'string' ? summary : '',
     full_summary: typeof summary === 'string' ? summary : '',
@@ -59,7 +73,35 @@ function normalizeDashboardSummary(summary) {
   };
 }
 
+function normalizeClientKeyPointSummary(summary) {
+  if (!summary || typeof summary !== 'object' || Array.isArray(summary)) return null;
+  const headline = summary.key_point_summary?.headline || summary.headline || summary.brief_overview || summary.overview || '';
+  const body = summary.key_point_summary?.body || summary.body || summary.full_summary || '';
+  if (!headline && !body) return null;
+  return {
+    key_point_summary: {
+      headline,
+      body,
+    },
+    headline,
+    body,
+    brief_overview: headline,
+    overview: headline,
+    full_summary: body,
+    source: summary.source || 'custom-llm',
+  };
+}
+
 function buildSessionCompletePayload(state, summary, biomarkers, memoryStorageKey, transcript) {
+  const summaryBundle = summary && typeof summary === 'object' && !Array.isArray(summary) && summary.dashboardSummary
+    ? summary
+    : { dashboardSummary: summary };
+  const aiPersonalSummary = !state.dashboard.meetingMode
+    ? normalizeClientKeyPointSummary(summaryBundle.clientKeyPointSummary)
+    : null;
+  const humanPersonalSummary = state.dashboard.meetingMode
+    ? normalizeClientKeyPointSummary(summaryBundle.clientKeyPointSummary)
+    : null;
   return {
     client_id: state.dashboard.clientId,
     consultant_id: state.dashboard.consultantId,
@@ -72,7 +114,9 @@ function buildSessionCompletePayload(state, summary, biomarkers, memoryStorageKe
     ended_at: new Date().toISOString(),
     duration_seconds: Math.max(0, Math.round((Date.now() - state.startedAtMs) / 1000)),
     status: 'completed',
-    summary: normalizeDashboardSummary(summary),
+    summary: normalizeDashboardSummary(summaryBundle.dashboardSummary),
+    ai_personal_summary: aiPersonalSummary,
+    human_personal_summary: humanPersonalSummary,
     biomarkers: {
       averages: flattenBiomarkers(biomarkers),
       voice: biomarkers?.voice || {},

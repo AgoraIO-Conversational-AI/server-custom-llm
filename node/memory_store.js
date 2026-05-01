@@ -41,7 +41,7 @@ let ENCRYPTION_KEY = '';   // hex string, 32 bytes = 64 hex chars
 let DATA_DIR = './data';
 let MAX_HISTORY_SESSIONS = 5;
 
-// Runtime state: channel → { userId, appId, injection, biomarkers: { voice: {}, vitals: {} }, llmApiKey }
+// Runtime state: channel → { userId, appId, injection, biomarkers: { voice: {}, vitals: {}, safety: {} }, llmApiKey }
 const channelState = new Map();
 
 // ─── Encryption helpers ───
@@ -111,6 +111,7 @@ function finalizeBiomarkers(bucket) {
 function summarizeSafety(metrics) {
   const safety = metrics?.safety || {};
   return {
+    level_stats: metrics?.safetyStats || null,
     current_level: safety.level ?? null,
     current_alert: safety.alert ?? false,
     current_concerns: safety.concerns || [],
@@ -157,6 +158,34 @@ function formatBiomarkerLine(biomarkers) {
   return parts.length ? `Biomarkers: ${parts.join(' | ')}` : '';
 }
 
+function normalizeKeyPointSummary(summary, fallbackHeadline = '', fallbackBody = '') {
+  const headline = normalizeSummaryText(
+    summary?.key_point_summary?.headline
+      || summary?.headline
+      || summary?.brief_overview
+      || summary?.overview
+      || fallbackHeadline
+  );
+  const body = normalizeSummaryText(
+    summary?.key_point_summary?.body
+      || summary?.body
+      || summary?.full_summary
+      || fallbackBody
+  );
+  return {
+    key_point_summary: {
+      headline,
+      body,
+    },
+    headline,
+    body,
+    brief_overview: headline,
+    overview: headline,
+    full_summary: body,
+    source: summary?.source || 'custom-llm',
+  };
+}
+
 function stripMarkdownCodeFence(text) {
   if (!text) return '';
   const trimmed = text.trim();
@@ -191,7 +220,7 @@ function buildSummaryBiomarkerContext(biomarkers) {
   return JSON.stringify(compact, null, 2);
 }
 
-function buildFallbackSummaries(text, biomarkers) {
+function buildFallbackSummaries(text, biomarkers, dashboardContext, meetingMode) {
   const normalized = normalizeSummaryText(text);
   const highestLevel = biomarkers?.safety?.highest_level;
   const highestConcerns = biomarkers?.safety?.highest_concerns || [];
@@ -204,9 +233,21 @@ function buildFallbackSummaries(text, biomarkers) {
     riskOverviewParts.push(`Key safety concerns: ${highestConcerns.join(', ')}.`);
   }
 
+  const existingClientSummary = meetingMode
+    ? dashboardContext?.human_personal_summary
+    : dashboardContext?.ai_personal_summary;
+  const fallbackClientSummary = existingClientSummary
+    ? normalizeKeyPointSummary(existingClientSummary)
+    : normalizeKeyPointSummary(
+        {},
+        meetingMode ? 'Client Key Point Summary - Human Sessions' : 'Client Key Point Summary - AI Sessions',
+        normalized
+      );
+
   return {
     memorySummary: normalized,
     dashboardSummary: {
+      ...normalizeKeyPointSummary({}, 'Session Key Point Summary', normalized),
       brief_overview: normalized,
       overview: normalized,
       full_summary: normalized,
@@ -215,10 +256,11 @@ function buildFallbackSummaries(text, biomarkers) {
       follow_up: '',
       source: 'custom-llm',
     },
+    clientKeyPointSummary: fallbackClientSummary,
   };
 }
 
-function buildMeetingModeSummaries(biomarkers, transcript) {
+function buildMeetingModeFallbackSummaries(biomarkers, transcript, dashboardContext) {
   const highlights = [];
   const voice = biomarkers?.voice || {};
   const vitals = biomarkers?.vitals || {};
@@ -249,6 +291,7 @@ function buildMeetingModeSummaries(biomarkers, transcript) {
   return {
     memorySummary: '',
     dashboardSummary: {
+      ...normalizeKeyPointSummary({}, 'Session Key Point Summary', fullSummary),
       brief_overview: brief,
       overview: brief,
       full_summary: fullSummary,
@@ -257,10 +300,13 @@ function buildMeetingModeSummaries(biomarkers, transcript) {
       follow_up: 'Review the biomarker changes alongside consultant notes from the meeting.',
       source: 'custom-llm',
     },
+    clientKeyPointSummary: dashboardContext?.human_personal_summary
+      ? normalizeKeyPointSummary(dashboardContext.human_personal_summary)
+      : normalizeKeyPointSummary({}, 'Client Key Point Summary - Human Sessions', fullSummary),
   };
 }
 
-function parseStructuredSummary(content, biomarkers) {
+function parseStructuredSummary(content, biomarkers, dashboardContext, meetingMode) {
   const raw = stripMarkdownCodeFence(content);
   try {
     const parsed = JSON.parse(raw);
@@ -270,7 +316,13 @@ function parseStructuredSummary(content, biomarkers) {
     const briefOverview = normalizeSummaryText(
       parsed?.consultant_summary?.brief_overview || parsed?.consultant_summary?.overview
     );
+    const sessionKps = normalizeKeyPointSummary(
+      parsed?.consultant_summary,
+      briefOverview || 'Session Key Point Summary',
+      fullSummary
+    );
     const dashboardSummary = {
+      ...sessionKps,
       brief_overview: briefOverview,
       overview: briefOverview,
       full_summary: fullSummary,
@@ -280,13 +332,19 @@ function parseStructuredSummary(content, biomarkers) {
       source: 'custom-llm',
     };
 
+    const clientKeyPointSummary = normalizeKeyPointSummary(
+      parsed?.client_key_point_summary,
+      meetingMode ? 'Client Key Point Summary - Human Sessions' : 'Client Key Point Summary - AI Sessions',
+      parsed?.client_key_point_summary?.body || fullSummary
+    );
+
     if (!fullSummary || !dashboardSummary.overview) {
-      return buildFallbackSummaries(content, biomarkers);
+      return buildFallbackSummaries(content, biomarkers, dashboardContext, meetingMode);
     }
 
-    return { memorySummary: fullSummary, dashboardSummary };
+    return { memorySummary: fullSummary, dashboardSummary, clientKeyPointSummary };
   } catch (_err) {
-    return buildFallbackSummaries(content, biomarkers);
+    return buildFallbackSummaries(content, biomarkers, dashboardContext, meetingMode);
   }
 }
 
@@ -367,10 +425,21 @@ function buildDashboardSummaryInjection(ctx) {
     lines.push('## Client Profile\n');
     lines.push(profileBits.join(' · '), '');
   }
+  const notes = normalizeSummaryText(ctx?.notes || '');
+  if (notes) {
+    lines.push('## Client Notes\n');
+    lines.push(notes, '');
+  }
+  const direction = normalizeSummaryText(ctx?.direction || '');
+  if (direction) {
+    lines.push('## Consultant Direction\n');
+    lines.push(direction, '');
+  }
   if (!aiSummary || typeof aiSummary !== 'object') return lines.join('\n').trim();
-  lines.push('## Client Personal Summary (AI Sessions)\n');
-  const brief = normalizeSummaryText(aiSummary.brief_overview || aiSummary.overview || '');
-  const full = normalizeSummaryText(aiSummary.full_summary || '');
+  lines.push('## Client Key Point Summary - AI Sessions\n');
+  const keyPointSummary = normalizeKeyPointSummary(aiSummary);
+  const brief = keyPointSummary.headline;
+  const full = keyPointSummary.body;
   const keyFacts = Array.isArray(aiSummary.key_facts) ? aiSummary.key_facts.filter((item) => typeof item === 'string' && item.trim()) : [];
   const openThreads = Array.isArray(aiSummary.open_threads) ? aiSummary.open_threads.filter((item) => typeof item === 'string' && item.trim()) : [];
   if (brief) lines.push(brief, '');
@@ -385,10 +454,6 @@ function buildDashboardSummaryInjection(ctx) {
     openThreads.slice(0, 5).forEach((item) => lines.push(`- ${item}`));
     lines.push('');
   }
-  const aiCount = Number(ctx?.ai_session_count || 0);
-  if (aiCount > 0) {
-    lines.push(`AI session count: ${aiCount}`);
-  }
   return lines.join('\n').trim();
 }
 
@@ -398,7 +463,7 @@ function mergeInjections(dashboardInjection, historyInjection) {
 
 // ─── Summarization ───
 
-async function summarizeConversation(messages, cachedApiKey, biomarkers) {
+async function summarizeSession({ messages, transcript, cachedApiKey, biomarkers, dashboardContext, meetingMode }) {
   const apiKey = cachedApiKey || process.env.LLM_API_KEY || process.env.YOUR_LLM_API_KEY || process.env.OPENAI_API_KEY || '';
   const baseURL = process.env.LLM_BASE_URL || 'https://api.openai.com/v1';
   const model = process.env.LLM_MODEL || 'gpt-4o-mini';
@@ -410,50 +475,62 @@ async function summarizeConversation(messages, cachedApiKey, biomarkers) {
 
   const client = new OpenAI({ apiKey, baseURL });
 
-  // Filter to user/assistant messages and biomarker system messages
-  const conversationText = messages
-    .filter(m => m.role === 'user' || m.role === 'assistant'
-      || (m.role === 'system' && (m.content?.includes('[Voice Biomarker') || m.content?.includes('[Camera Vitals'))))
-    .map(m => {
-      if (m.role === 'system') return `[Biomarker Data]: ${m.content}`;
-      return `${m.role === 'user' ? 'Client' : 'Therapist'}: ${m.content}`;
-    })
-    .join('\n');
+  const conversationText = meetingMode
+    ? (typeof transcript?.text === 'string' ? transcript.text.trim() : '')
+    : messages
+        .filter(m => m.role === 'user' || m.role === 'assistant'
+          || (m.role === 'system' && (m.content?.includes('[Voice Biomarker') || m.content?.includes('[Camera Vitals'))))
+        .map(m => {
+          if (m.role === 'system') return `[Biomarker Data]: ${m.content}`;
+          return `${m.role === 'user' ? 'Client' : 'Therapist'}: ${m.content}`;
+        })
+        .join('\n');
 
   if (conversationText.length < 50) {
     logger.info('Conversation too short to summarize');
-    return null;
+    return meetingMode
+      ? buildMeetingModeFallbackSummaries(biomarkers, transcript, dashboardContext)
+      : buildFallbackSummaries(conversationText, biomarkers, dashboardContext, meetingMode);
   }
 
   try {
+    const currentClientKps = meetingMode
+      ? normalizeKeyPointSummary(dashboardContext?.human_personal_summary || {})
+      : normalizeKeyPointSummary(dashboardContext?.ai_personal_summary || {});
     const response = await client.chat.completions.create({
       model,
       messages: [
         {
           role: 'system',
           content:
-            'You are generating two different summaries for the same session. '
+            'You are generating a session summary and an updated client key point summary. '
             + 'Return valid JSON only with this exact shape: '
-            + '{"consultant_summary":{"brief_overview":"...","full_summary":"...","biomarker_summary":"...","risk_overview":"...","follow_up":"..."}}. '
+            + '{"consultant_summary":{"key_point_summary":{"headline":"...","body":"..."},"brief_overview":"...","full_summary":"...","biomarker_summary":"...","risk_overview":"...","follow_up":"..."},"client_key_point_summary":{"headline":"...","body":"..."}}. '
             + 'Rules: '
-            + '1) consultant_summary.brief_overview is a short consultant-facing summary for quick scanning, 1-2 sentences. '
-            + '2) consultant_summary.full_summary is a fuller consultant-facing summary and will also be reused as AI continuity for future sessions; include broad themes, what helped, unresolved threads, follow-up needs, and any stable personal facts or preferences that are likely to matter for continuity in later sessions. '
-            + '3) consultant_summary.biomarker_summary should mention the main biomarker takeaways only when supported by the provided biomarker context. '
-            + '4) consultant_summary.risk_overview must mention the worst safety state reached during the call when safety data is present, even if the session later de-escalated. '
-            + '5) consultant_summary.follow_up should say what a consultant should monitor or revisit next. '
+            + '1) consultant_summary.key_point_summary.headline is a short title for the session. '
+            + '2) consultant_summary.key_point_summary.body is the main session key point summary in concise prose. '
+            + '3) consultant_summary.brief_overview should match the headline and consultant_summary.full_summary should match the body. '
+            + '4) consultant_summary.biomarker_summary should mention the main biomarker takeaways only when supported by the provided biomarker context. '
+            + '5) consultant_summary.risk_overview must mention the worst safety state reached during the call when safety data is present, even if the session later de-escalated. '
+            + '6) consultant_summary.follow_up should say what a consultant should monitor or revisit next. '
+            + `7) client_key_point_summary is the UPDATED long-lived summary for future ${meetingMode ? 'human' : 'AI'} sessions, merging the existing client key point summary with what was learned in this session. `
+            + 'Preserve durable facts, preferences, risks, recurring themes, and unresolved threads. Keep it concise and useful. '
             + 'Keep each field concise. Do not mention internal systems or dashboards.',
         },
         {
           role: 'user',
-          content: `Conversation:\n${conversationText}\n\nFinal biomarker context:\n${buildSummaryBiomarkerContext(biomarkers)}`,
+          content:
+            `Current client key point summary:\nHeadline: ${currentClientKps.headline || '(none)'}\nBody: ${currentClientKps.body || '(none)'}`
+            + `\n\nSession type: ${meetingMode ? 'Human-human therapist session' : 'AI-human session'}`
+            + `\n\nConversation:\n${conversationText}\n\nFinal biomarker context:\n${buildSummaryBiomarkerContext(biomarkers)}`,
         },
       ],
       response_format: { type: 'json_object' },
-      max_tokens: 700,
+      max_tokens: 900,
     });
     const content = response.choices[0]?.message?.content || null;
     if (!content) return null;
-    return parseStructuredSummary(content, biomarkers);
+    return parseStructuredSummary(content, biomarkers, dashboardContext, meetingMode);
   } catch (err) {
     logger.error('Structured summarization failed; retrying with text fallback:', err);
   }
@@ -478,10 +555,14 @@ async function summarizeConversation(messages, cachedApiKey, biomarkers) {
     });
     const fallbackContent = fallbackResponse.choices[0]?.message?.content || null;
     if (!fallbackContent) return null;
-    return buildFallbackSummaries(fallbackContent, biomarkers);
+    return meetingMode
+      ? buildMeetingModeFallbackSummaries(biomarkers, transcript, dashboardContext)
+      : buildFallbackSummaries(fallbackContent, biomarkers, dashboardContext, meetingMode);
   } catch (fallbackErr) {
     logger.error('Summarization failed:', fallbackErr);
-    return null;
+    return meetingMode
+      ? buildMeetingModeFallbackSummaries(biomarkers, transcript, dashboardContext)
+      : buildFallbackSummaries(conversationText, biomarkers, dashboardContext, meetingMode);
   }
 }
 
@@ -540,7 +621,8 @@ module.exports = {
       injection,
       historyInjection: injection,
       dashboardInjection: '',
-      biomarkers: { voice: {}, vitals: {} },
+      dashboardContext: null,
+      biomarkers: { voice: {}, vitals: {}, safety: {} },
       startedAt: new Date().toISOString(),
       startedAtMs: Date.now(),
       sessionId: earlyParams?.session_id || crypto.randomUUID(),
@@ -549,16 +631,19 @@ module.exports = {
       meetingMode,
     });
 
-    if (dashboard && !meetingMode) {
+    if (dashboard) {
       dashboardClient.getClientContext(dashboard, logger)
         .then((contextPayload) => {
           const state = channelState.get(channel);
           if (!state) return;
-          state.dashboardInjection = buildDashboardSummaryInjection(contextPayload);
-          state.injection = mergeInjections(state.dashboardInjection, state.historyInjection);
-          logger.info(
-            `Loaded dashboard AI summary for channel=${channel} ai_sessions=${contextPayload.ai_session_count || 0} injection_chars=${(state.dashboardInjection || '').length}`
-          );
+          state.dashboardContext = contextPayload;
+          if (!meetingMode) {
+            state.dashboardInjection = buildDashboardSummaryInjection(contextPayload);
+            state.injection = mergeInjections(state.dashboardInjection, state.historyInjection);
+            logger.info(
+              `Loaded dashboard AI summary for channel=${channel} ai_sessions=${contextPayload.ai_session_count || 0} injection_chars=${(state.dashboardInjection || '').length}`
+            );
+          }
         })
         .catch((err) => {
           logger.error(`Failed to load dashboard client context for channel=${channel}: ${err.message}`);
@@ -587,7 +672,7 @@ module.exports = {
         injection: historyInjection,
         historyInjection,
         dashboardInjection: '',
-        biomarkers: { voice: {}, vitals: {} },
+        biomarkers: { voice: {}, vitals: {}, safety: {} },
       });
     }
 
@@ -626,6 +711,9 @@ module.exports = {
           if (typeof value === 'number' && !isNaN(value)) {
             updateRunningAvg(state.biomarkers.voice, key, value);
           }
+        }
+        if (typeof metrics.safety?.level === 'number' && !isNaN(metrics.safety.level)) {
+          updateRunningAvg(state.biomarkers.safety || (state.biomarkers.safety = {}), 'safety_level', metrics.safety.level);
         }
       }
     }
@@ -691,13 +779,21 @@ module.exports = {
     const biomarkers = {
       voice: finalizeBiomarkers(state.biomarkers?.voice || {}),
       vitals: finalizeBiomarkers(state.biomarkers?.vitals || {}),
-      safety: summarizeSafety(thymiaStore ? thymiaStore.getMetrics(appId, channel) : null),
+      safety: summarizeSafety({
+        ...(thymiaStore ? thymiaStore.getMetrics(appId, channel) : null),
+        safetyStats: finalizeBiomarkers(state.biomarkers?.safety || {}).safety_level || null,
+      }),
     };
     const transcript = state?.meetingMode ? getMeetingTranscript(runtimeKey || state.runtimeKey || '') : null;
 
-    const summaries = state?.meetingMode
-      ? buildMeetingModeSummaries(biomarkers, transcript)
-      : await summarizeConversation(messages, state.llmApiKey, biomarkers);
+    const summaries = await summarizeSession({
+      messages,
+      transcript,
+      cachedApiKey: state.llmApiKey,
+      biomarkers,
+      dashboardContext: state.dashboardContext,
+      meetingMode: !!state?.meetingMode,
+    });
     if (!summaries) return;
     logger.info(
       `Generated session summaries for channel=${channel} session_id=${state.sessionId} ` +
