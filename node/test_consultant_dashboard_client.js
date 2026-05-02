@@ -170,6 +170,47 @@ test('buildSessionCompletePayload preserves existing client KPS when dashboard c
   assert.equal(payload.human_personal_summary, null);
 });
 
+test('buildSessionCompletePayload sends fresh AI KPS for a first AI session', () => {
+  const payload = buildSessionCompletePayload(
+    {
+      channel: 'demo-channel',
+      sessionId: 'sess-first-ai',
+      startedAt: '2026-04-13T18:00:00Z',
+      startedAtMs: Date.now() - 300000,
+      dashboard: {
+        clientId: 'client-123',
+        consultantId: 'consultant-456',
+        profileName: 'therapy',
+        meetingMode: false,
+      },
+      dashboardContext: {
+        ai_personal_summary: null,
+        ai_session_count: 0,
+      },
+    },
+    {
+      dashboardSummary: {
+        key_point_summary: { headline: 'Session Key Point Summary', body: 'Body' },
+        brief_overview: 'Session Key Point Summary',
+        full_summary: 'Body',
+      },
+      clientKeyPointSummary: {
+        key_point_summary: {
+          headline: 'Client Key Point Summary - AI Sessions',
+          body: 'Fresh first-session KPS body.',
+        },
+      },
+    },
+    { voice: {}, vitals: {} },
+    '',
+    null
+  );
+
+  assert.equal(payload.ai_personal_summary.key_point_summary.headline, 'Client Key Point Summary - AI Sessions');
+  assert.equal(payload.ai_personal_summary.key_point_summary.body, 'Fresh first-session KPS body.');
+  assert.equal(payload.human_personal_summary, null);
+});
+
 test('buildSessionCompletePayload includes meeting metadata when present', () => {
   const payload = buildSessionCompletePayload(
     {
