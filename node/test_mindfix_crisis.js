@@ -321,6 +321,10 @@ test('De-escalation during grace window cancels pending escalation', async () =>
     channel: 'chan-grace',
     safety: safetyAt(3),
   });
+  assert.match(
+    crisisModule.getSystemInjection('app-grace', 'chan-grace'),
+    /Do not tell the client to contact their escalation person manually/i
+  );
   await crisisModule.onSafetyUpdate({
     appId: 'app-grace',
     channel: 'chan-grace',
@@ -332,6 +336,7 @@ test('De-escalation during grace window cancels pending escalation', async () =>
   assert.equal(dashboard.initCalls.length, 0);
   assert.equal(dial.calls.length, 0);
   assert.equal(speak.speaks.length, 0);
+  assert.equal(crisisModule.getSystemInjection('app-grace', 'chan-grace'), '');
 });
 
 test('Trigger-once: two consecutive level-3 updates produce a single escalation', async () => {

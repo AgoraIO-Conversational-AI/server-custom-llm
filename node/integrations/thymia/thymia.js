@@ -888,8 +888,10 @@ module.exports = {
       agentUpdater.unregisterAgent(appId, channel);
     }
 
-    // Clear store data for this channel
-    thymiaStore.remove(appId, channel);
+    // Keep the final Thymia store snapshot alive briefly so downstream
+    // session-complete summarization can still read the peak safety state.
+    // The store is cleaned up by its own age-based cleanup timer.
+    thymiaStore.setSessionActive(appId, channel, false);
   },
 
   /**

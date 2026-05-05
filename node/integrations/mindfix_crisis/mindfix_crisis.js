@@ -70,6 +70,15 @@ function escapeLine(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
+function buildPendingEscalationInstruction() {
+  return (
+    '[Crisis] A crisis escalation may already be underway during a short grace window. ' +
+    'Do not tell the client to contact their escalation person manually, do not tell them to call emergency services, ' +
+    'and do not imply they must arrange outside contact themselves unless the user specifically asks. ' +
+    'Stay calm, supportive, and brief. Focus on grounding, immediate safety, and keeping the client engaged while the system handles any needed escalation.'
+  );
+}
+
 function fallbackTexts(clientName, safety, triggeringText = '') {
   const firstName = (clientName || 'the client').split(/\s+/)[0];
   const concerns = Array.isArray(safety?.concerns) ? safety.concerns.slice(0, 2).join(', ') : '';
@@ -376,6 +385,13 @@ module.exports = {
   getSuppressionInstruction(appId, channel) {
     const state = channelState.get(getKey(appId, channel));
     return state?.suppressionNote || '';
+  },
+
+  getSystemInjection(appId, channel) {
+    const state = channelState.get(getKey(appId, channel));
+    if (!state || !isAiHumanSession(state)) return '';
+    if (state.phase !== 'pending' || state.suppressed) return '';
+    return buildPendingEscalationInstruction();
   },
 
   async onAgentUnregistered(appId, channel) {
