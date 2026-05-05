@@ -51,6 +51,11 @@ Current ownership rule:
   - `ai_personal_summary` or `human_personal_summary`
 - the dashboard stores and renders them
 
+Crisis module interface note:
+
+- `mindfix_crisis.getSystemInjection(appId, channel)` is part of the module contract
+- when escalation is pending, it can inject short-lived system guidance that suppresses unhelpful advice such as telling the client to arrange emergency outreach manually while the automated escalation path is already in progress
+
 ## Go-Node.js IPC Protocol
 
 ### stdin (Node → Go): Newline-delimited JSON

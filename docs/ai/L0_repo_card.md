@@ -11,7 +11,7 @@
 | Language | Node.js (Express) + Go (CGO) |
 | Deploy Target | Docker / bare metal |
 | Owner | Agora ConvoAI |
-| Last Reviewed | 2026-04-28 |
+| Last Reviewed | 2026-05-05 |
 
 ## L1 — Summaries
 

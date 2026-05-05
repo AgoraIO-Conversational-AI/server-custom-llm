@@ -48,6 +48,13 @@
 - the file must load successfully at runtime
 - the store now falls back to default Agora safety when the prompt file is missing, but the custom policy itself still will not run
 
+## Thymia Teardown Timing
+
+- on agent unregister, Thymia session state is no longer removed immediately
+- the module now marks the session inactive with `setSessionActive(false)` so downstream summarization can still read the final peak safety snapshot
+- this means cleanup timing is intentionally delayed relative to the older “remove immediately” behavior
+- if you reintroduce eager removal here, persisted session biomarkers can lose the crisis peak even though live escalation worked
+
 ## AI-Human Memory Requires Two Flags
 
 - `ENABLE_MEMORY=true` alone does not persist session summaries
