@@ -8,13 +8,14 @@
 
 Standard OpenAI chat completions with server-side tool execution.
 
-**Extra field:** `context` object with `appId`, `userId`, `channel`.
+**Extra fields:** `context` object with `appId`, `userId`, `channel`, plus optional `reasoning_effort` for GPT-5 reasoning models.
 
 ```json
 {
   "model": "gpt-4o-mini",
   "messages": [{"role": "user", "content": "Hello"}],
   "stream": true,
+  "reasoning_effort": "medium",
   "context": {
     "appId": "abc123",
     "userId": "user1",
@@ -22,6 +23,14 @@ Standard OpenAI chat completions with server-side tool execution.
   }
 }
 ```
+
+Notes:
+- `reasoning_effort` is only forwarded for GPT-5-family reasoning models.
+- If omitted, the service uses `LLM_REASONING_EFFORT` from env when set.
+- Unsupported effort/model combinations are rejected by the upstream OpenAI-compatible provider.
+- On the Chat Completions path, GPT-5 reasoning effort may conflict with function tools.
+  - when this service only added its default tools, it drops them so `reasoning_effort` can be forwarded
+  - when the caller explicitly supplies tools, the service keeps the tools and ignores `reasoning_effort`
 
 ### POST /rag/chat/completions
 

@@ -37,10 +37,12 @@ const DEFAULT_LLM_API_KEY =
   '';
 const DEFAULT_LLM_BASE_URL = process.env.LLM_BASE_URL || 'https://api.openai.com/v1';
 const DEFAULT_LLM_MODEL = process.env.LLM_MODEL || 'gpt-4o-mini';
+const DEFAULT_LLM_REASONING_EFFORT = (process.env.LLM_REASONING_EFFORT || '').trim().toLowerCase();
 const AGENT_SERVER_SHARED_SECRET = process.env.AGENT_SERVER_SHARED_SECRET || '';
 const MAX_TRANSCRIPT_TEXT_LENGTH = 200000;
 const MAX_TRANSCRIPT_LINES = 5000;
 const MAX_TRANSCRIPT_LINE_LENGTH = 2000;
+const SUPPORTED_REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
 
 /**
  * Get an OpenAI client for this request.
@@ -156,6 +158,34 @@ function sendSuppressedResponse(res, model, stream) {
       },
     ],
   });
+}
+
+function resolveReasoningEffort(model, requestedEffort) {
+  const normalizedModel = String(model || '').trim().toLowerCase();
+  if (!normalizedModel.startsWith('gpt-5')) return undefined;
+
+  const normalizedEffort = String(requestedEffort || '').trim().toLowerCase();
+  if (!normalizedEffort) return undefined;
+  if (!SUPPORTED_REASONING_EFFORTS.has(normalizedEffort)) return undefined;
+  return normalizedEffort;
+}
+
+function resolveToolingForReasoning({ model, requestTools, tools, reasoningEffort }) {
+  if (!resolveReasoningEffort(model, reasoningEffort) || !tools.length) {
+    return { tools, reasoningEffort };
+  }
+
+  if (Array.isArray(requestTools) && requestTools.length > 0) {
+    logger.warn(
+      `[ReasoningEffort] Ignoring reasoning_effort=${reasoningEffort} for model=${model} because explicit tools were requested and Chat Completions does not support both together for this GPT-5 model.`
+    );
+    return { tools, reasoningEffort: undefined };
+  }
+
+  logger.info(
+    `[ReasoningEffort] Dropping auto-added tools for model=${model} so reasoning_effort=${reasoningEffort} can be forwarded via Chat Completions.`
+  );
+  return { tools: [], reasoningEffort };
 }
 
 if (crisisModule) {
@@ -814,6 +844,7 @@ app.post('/chat/completions', async (req, res) => {
       modalities = ['text'],
       tools: requestTools,
       tool_choice,
+      reasoning_effort,
       response_format,
       audio,
       stream = true,
@@ -905,8 +936,21 @@ app.post('/chat/completions', async (req, res) => {
     // GPT-5.x reasoning models use max_completion_tokens instead of max_tokens
     // and don't support temperature
     const isReasoningModel = model && model.toLowerCase().startsWith('gpt-5');
-
-    const tools = getToolsForRequest(requestTools);
+    const resolvedReasoningEffort = resolveReasoningEffort(
+      model,
+      reasoning_effort || DEFAULT_LLM_REASONING_EFFORT
+    );
+    const requestedExplicitTools = Array.isArray(requestTools) && requestTools.length > 0;
+    const baseTools = getToolsForRequest(requestTools);
+    const {
+      tools,
+      reasoningEffort: effectiveReasoningEffort,
+    } = resolveToolingForReasoning({
+      model,
+      requestTools: requestedExplicitTools ? requestTools : null,
+      tools: baseTools,
+      reasoningEffort: resolvedReasoningEffort,
+    });
     let messages = buildMessagesWithHistory(
       appId,
       userId,
@@ -964,6 +1008,9 @@ app.post('/chat/completions', async (req, res) => {
         };
         if (isReasoningModel) {
           completionParams.max_completion_tokens = 1024;
+          if (effectiveReasoningEffort) {
+            completionParams.reasoning_effort = effectiveReasoningEffort;
+          }
         }
         const response = await client.chat.completions.create(completionParams);
 
@@ -1027,6 +1074,9 @@ app.post('/chat/completions', async (req, res) => {
       };
       if (isReasoningModel) {
         streamParams.max_completion_tokens = 1024;
+        if (effectiveReasoningEffort) {
+          streamParams.reasoning_effort = effectiveReasoningEffort;
+        }
       }
       const completion = await client.chat.completions.create(streamParams);
 
@@ -1130,6 +1180,7 @@ app.post('/rag/chat/completions', async (req, res) => {
       modalities = ['text'],
       tools: requestTools,
       tool_choice,
+      reasoning_effort,
       response_format,
       audio,
       stream = true,
@@ -1181,6 +1232,10 @@ app.post('/rag/chat/completions', async (req, res) => {
       channel,
       requestMessages
     );
+    const resolvedReasoningEffort = resolveReasoningEffort(
+      model,
+      reasoning_effort || DEFAULT_LLM_REASONING_EFFORT
+    );
 
     // Perform RAG retrieval
     const retrievedContext = performRagRetrieval(messages);
@@ -1190,15 +1245,20 @@ app.post('/rag/chat/completions', async (req, res) => {
 
     // Create streaming completion
     const ragClient = getOpenAIClient(req);
-    const completion = await ragClient.chat.completions.create({
+    const completionParams = {
       model,
       messages: ragMessages,
-      tools: requestTools ? requestTools : undefined,
+      tools: effectiveRequestTools.length ? effectiveRequestTools : undefined,
       tool_choice:
-        requestTools && tool_choice ? tool_choice : undefined,
+        effectiveRequestTools.length && tool_choice ? tool_choice : undefined,
       response_format,
       stream: true,
-    });
+    };
+    if (effectiveReasoningEffort) {
+      completionParams.max_completion_tokens = 1024;
+      completionParams.reasoning_effort = effectiveReasoningEffort;
+    }
+    const completion = await ragClient.chat.completions.create(completionParams);
 
     let accumulatedContent = '';
 

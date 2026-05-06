@@ -38,6 +38,7 @@ For the live PM2 process, that same `node/.env` file is the restart source of tr
 | `LLM_API_KEY` | Yes | - | OpenAI API key (or compatible) |
 | `LLM_BASE_URL` | No | `https://api.openai.com/v1` | LLM API base URL |
 | `LLM_MODEL` | No | `gpt-4o-mini` | Model to use |
+| `LLM_REASONING_EFFORT` | No | unset | Default reasoning effort for GPT-5 reasoning models |
 | `PORT` | No | `8101` | Server port |
 | `THYMIA_ENABLED` | No | `false` | Enable Thymia voice biomarkers |
 | `THYMIA_API_KEY` | If Thymia | - | Thymia Sentinel API key |

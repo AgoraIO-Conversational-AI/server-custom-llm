@@ -29,6 +29,7 @@ export LLM_API_KEY=sk-...
 | `LLM_API_KEY`  | API key for LLM provider | _(required)_                |
 | `LLM_BASE_URL` | LLM API base URL         | `https://api.openai.com/v1` |
 | `LLM_MODEL`    | Default model name       | `gpt-4o-mini`               |
+| `LLM_REASONING_EFFORT` | Default reasoning effort for GPT-5 models | _(unset)_ |
 
 Legacy env vars `YOUR_LLM_API_KEY` and `OPENAI_API_KEY` are also accepted.
 
@@ -93,6 +94,29 @@ curl -X POST http://localhost:8101/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"messages": [{"role": "user", "content": "Hello, how are you?"}], "stream": true, "model": "gpt-4o-mini"}'
 ```
+
+For GPT-5 models, you can optionally set `reasoning_effort` per request or via `LLM_REASONING_EFFORT`:
+
+```bash
+curl -X POST http://localhost:8101/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Hello"}],"stream":false,"model":"gpt-5.4-mini","reasoning_effort":"medium"}'
+```
+
+Supported values are model-dependent, but OpenAI reasoning models generally accept:
+- `none`
+- `minimal`
+- `low`
+- `medium`
+- `high`
+- `xhigh`
+
+If the upstream model rejects a value, the OpenAI-compatible provider returns an error.
+
+Current Chat Completions limitation:
+- for GPT-5 reasoning models, OpenAI may reject `reasoning_effort` when function tools are attached
+- this server drops its auto-added tools when `reasoning_effort` is requested
+- if the caller explicitly supplies tools, the server keeps the tools and ignores `reasoning_effort`
 
 Run the automated tests:
 
