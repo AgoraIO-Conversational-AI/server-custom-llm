@@ -109,9 +109,8 @@ Supported values are model-dependent, but OpenAI reasoning models generally acce
 - `low`
 - `medium`
 - `high`
-- `xhigh`
 
-If the upstream model rejects a value, the OpenAI-compatible provider returns an error.
+Unsupported values are ignored by this server with a warning in the logs.
 
 Current Chat Completions limitation:
 - for GPT-5 reasoning models, OpenAI may reject `reasoning_effort` when function tools are attached

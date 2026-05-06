@@ -42,7 +42,7 @@ const AGENT_SERVER_SHARED_SECRET = process.env.AGENT_SERVER_SHARED_SECRET || '';
 const MAX_TRANSCRIPT_TEXT_LENGTH = 200000;
 const MAX_TRANSCRIPT_LINES = 5000;
 const MAX_TRANSCRIPT_LINE_LENGTH = 2000;
-const SUPPORTED_REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+const SUPPORTED_REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high']);
 
 /**
  * Get an OpenAI client for this request.
@@ -166,7 +166,12 @@ function resolveReasoningEffort(model, requestedEffort) {
 
   const normalizedEffort = String(requestedEffort || '').trim().toLowerCase();
   if (!normalizedEffort) return undefined;
-  if (!SUPPORTED_REASONING_EFFORTS.has(normalizedEffort)) return undefined;
+  if (!SUPPORTED_REASONING_EFFORTS.has(normalizedEffort)) {
+    logger.warn(
+      `[ReasoningEffort] Ignoring unsupported reasoning_effort=${normalizedEffort} for model=${model}. Supported values: ${Array.from(SUPPORTED_REASONING_EFFORTS).join(', ')}`
+    );
+    return undefined;
+  }
   return normalizedEffort;
 }
 
@@ -1236,6 +1241,17 @@ app.post('/rag/chat/completions', async (req, res) => {
       model,
       reasoning_effort || DEFAULT_LLM_REASONING_EFFORT
     );
+    const requestedExplicitTools = Array.isArray(requestTools) && requestTools.length > 0;
+    const baseTools = requestedExplicitTools ? requestTools : [];
+    const {
+      tools: effectiveRequestTools,
+      reasoningEffort: effectiveReasoningEffort,
+    } = resolveToolingForReasoning({
+      model,
+      requestTools: requestedExplicitTools ? requestTools : null,
+      tools: baseTools,
+      reasoningEffort: resolvedReasoningEffort,
+    });
 
     // Perform RAG retrieval
     const retrievedContext = performRagRetrieval(messages);
