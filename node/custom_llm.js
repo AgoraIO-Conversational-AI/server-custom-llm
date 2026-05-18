@@ -1523,7 +1523,7 @@ function handleRTMPresence(channel, event) {
   logger.info(`[Presence] ${role} RTM UID ${publisher} left channel ${channel} (${type}) — triggering cleanup`);
 
   if (!appId) {
-    logger.warn(`[Presence] No agent registry entry for channel ${channel} — skipping cleanup`);
+    logger.info(`[Presence] No agent registry entry for channel ${channel} — skipping cleanup`);
     return;
   }
 

@@ -127,6 +127,28 @@ function setupEventListeners(session) {
     }
   });
 
+  client.addEventListener('presence', (event) => {
+    const type = event.eventType || event.type || 'unknown';
+    const publisher = event.publisher || event.userId || 'unknown';
+    const ch = event.channelName || channel;
+    logger.info(`[${ch}] Presence: ${type} publisher=${publisher}`);
+
+    // Log snapshot if available (initial user list on subscribe)
+    if (event.snapshot) {
+      const uids = Object.keys(event.snapshot);
+      logger.info(`[${ch}] Presence snapshot: ${uids.length} user(s): ${uids.join(', ')}`);
+    }
+
+    // Fan out to registered presence handlers
+    for (const handler of presenceHandlers) {
+      try {
+        handler(ch, event);
+      } catch (e) {
+        logger.error(`[${ch}] Presence handler error:`, e);
+      }
+    }
+  });
+
   client.addEventListener('error', (error) => {
     logger.error(`[${channel}] RTM error: ${error.message || error}`, error);
   });
@@ -245,6 +267,8 @@ function onRTMMessage(callback) {
 /**
  * Register a handler for RTM presence events (join/leave/timeout).
  * Handler signature: (channel, event) => void
+ * event.eventType: 'REMOTE_JOIN' | 'REMOTE_LEAVE' | 'REMOTE_TIMEOUT' | 'SNAPSHOT' etc.
+ * event.publisher: the RTM UID that joined/left
  */
 function onPresence(callback) {
   presenceHandlers.push(callback);
