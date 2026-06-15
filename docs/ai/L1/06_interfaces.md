@@ -50,6 +50,7 @@ The MindFix memory/summarization path depends on two signed dashboard contracts:
 
 - `GET /internal/client-context`
   - returns demographics, notes, direction, latest summary, biomarker baseline, and the stored AI/human client key point summaries
+  - also returns `consultant_ai_testing_mode` and `ai_escalation_enabled`
 - `POST /internal/session-complete`
   - receives the final session summary, updated client key point summary, biomarker aggregates, transcript, and memory key
 
@@ -64,6 +65,7 @@ Crisis module interface note:
 
 - `mindfix_crisis.getSystemInjection(appId, channel)` is part of the module contract
 - when escalation is pending, it can inject short-lived system guidance that suppresses unhelpful advice such as telling the client to arrange emergency outreach manually while the automated escalation path is already in progress
+- when `ai_escalation_enabled=false` for the client, the crisis module should not enter the pending-escalation path at all
 
 ## Go-Node.js IPC Protocol
 

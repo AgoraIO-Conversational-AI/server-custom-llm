@@ -17,6 +17,8 @@ function createDashboardConfig(earlyParams) {
     meetingId: earlyParams.meeting_id || '',
     meetingMode: !!earlyParams.meeting_mode,
     meetingRuntimeKey: earlyParams.meeting_runtime_key || '',
+    aiTestingMode: !!earlyParams.consultant_ai_testing_mode,
+    clientAiEscalationEnabled: earlyParams.client_ai_escalation_enabled !== false,
   };
 }
 

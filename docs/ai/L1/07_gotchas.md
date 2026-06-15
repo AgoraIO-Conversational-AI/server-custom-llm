@@ -69,7 +69,18 @@
   - notes
   - direction
   - `Client Key Point Summary - AI Sessions`
+-  - `consultant_ai_testing_mode`
+-  - `ai_escalation_enabled`
 - if `client-context` fails, AI continuity falls back to local encrypted session history only
+
+## AI Transcript Retention And Escalation Flags Are Separate
+
+- `consultant_ai_testing_mode=true`
+  - retain full AI transcripts for that consultant's AI sessions
+  - does not itself disable escalation
+- `ai_escalation_enabled=false`
+  - suppress live AI escalation for that client
+  - the crisis module must not enter its pending-escalation path or inject “escalation underway” guidance
 
 ## `node/.env` Is the Restart Source of Truth
 

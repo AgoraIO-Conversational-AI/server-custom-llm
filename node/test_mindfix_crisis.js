@@ -262,6 +262,47 @@ test('Human-human session: onSafetyUpdate is a no-op', async () => {
   assert.equal(crisisModule.shouldSuppressAssistantReply('app-mtg', 'chan-mtg'), false);
 });
 
+test('AI session with escalation disabled for client is a no-op', async () => {
+  const statusCalls = [];
+  const dashboard = makeDashboardMock({ statusCalls });
+  const dial = makeDialMock({ phase: 'answered', outcome: 'OK' });
+  const speak = makeAgentSpeakMocks();
+
+  setupAgent({
+    appId: 'app-client-disabled',
+    channel: 'chan-client-disabled',
+    deps: {
+      dashboardClient: {
+        ...dashboard,
+        createDashboardConfig: (params) => ({
+          baseUrl: 'http://test-dashboard',
+          sharedSecret: 'test-secret',
+          clientId: params.client_id || '',
+          displayName: params.display_name || 'Test Client',
+          meetingId: params.meeting_id || '',
+          meetingMode: !!params.meeting_mode,
+          clientAiEscalationEnabled: false,
+        }),
+      },
+      dialOutboundIntoChannel: dial.fn,
+      recordAssistantUtterance: speak.recordAssistantUtterance,
+      speakWithAgent: speak.speakWithAgent,
+    },
+  });
+
+  await crisisModule.onSafetyUpdate({
+    appId: 'app-client-disabled',
+    channel: 'chan-client-disabled',
+    safety: safetyAt(3),
+  });
+
+  assert.equal(dashboard.initCalls.length, 0);
+  assert.equal(dial.calls.length, 0);
+  assert.equal(speak.speaks.length, 0);
+  assert.equal(crisisModule.shouldSuppressAssistantReply('app-client-disabled', 'chan-client-disabled'), false);
+  assert.equal(crisisModule.getSystemInjection('app-client-disabled', 'chan-client-disabled'), '');
+});
+
 test('Level below trigger does not escalate', async () => {
   const statusCalls = [];
   const dashboard = makeDashboardMock({ statusCalls });

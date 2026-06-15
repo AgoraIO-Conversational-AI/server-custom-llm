@@ -461,6 +461,33 @@ function mergeInjections(dashboardInjection, historyInjection) {
   return [dashboardInjection, historyInjection].filter(Boolean).join('\n\n').trim() || null;
 }
 
+function buildAiTranscript(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return null;
+  const lines = [];
+  for (const message of messages) {
+    if (!message || typeof message !== 'object') continue;
+    const role = message.role === 'assistant'
+      ? 'Therapist'
+      : message.role === 'user'
+        ? 'Client'
+        : null;
+    if (!role) continue;
+    const content = typeof message.content === 'string' ? message.content.trim() : '';
+    if (!content) continue;
+    lines.push({
+      speaker: role,
+      text: content,
+      time: message.timestamp || message.created_at || '',
+    });
+  }
+  if (!lines.length) return null;
+  return {
+    provider: 'conversation_store',
+    text: lines.map((line) => `${line.speaker}: ${line.text}`).join('\n'),
+    lines,
+  };
+}
+
 // ─── Summarization ───
 
 async function summarizeSession({ messages, transcript, cachedApiKey, biomarkers, dashboardContext, meetingMode }) {
@@ -784,7 +811,9 @@ module.exports = {
         safetyStats: finalizeBiomarkers(state.biomarkers?.safety || {}).safety_level || null,
       }),
     };
-    const transcript = state?.meetingMode ? getMeetingTranscript(runtimeKey || state.runtimeKey || '') : null;
+    const transcript = state?.meetingMode
+      ? getMeetingTranscript(runtimeKey || state.runtimeKey || '')
+      : (state?.dashboard?.aiTestingMode ? buildAiTranscript(messages) : null);
 
     const summaries = await summarizeSession({
       messages,

@@ -23,12 +23,16 @@ test('createDashboardConfig returns config when metadata is present', () => {
     client_id: 'client-123',
     consultant_id: 'consultant-456',
     profile_name: 'therapy',
+    consultant_ai_testing_mode: true,
+    client_ai_escalation_enabled: false,
   });
 
   assert.equal(config.baseUrl, 'http://127.0.0.1:8090');
   assert.equal(config.clientId, 'client-123');
   assert.equal(config.consultantId, 'consultant-456');
   assert.equal(config.profileName, 'therapy');
+  assert.equal(config.aiTestingMode, true);
+  assert.equal(config.clientAiEscalationEnabled, false);
 });
 
 test('createDashboardConfig accepts generic meeting context fields', () => {

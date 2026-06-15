@@ -43,6 +43,10 @@ function isAiHumanSession(state) {
   return !!(state?.dashboard && !state.dashboard.meetingMode);
 }
 
+function isClientEscalationEnabled(state) {
+  return state?.dashboard?.clientAiEscalationEnabled !== false;
+}
+
 function getOrCreateState(appId, channel) {
   const key = getKey(appId, channel);
   if (!channelState.has(key)) {
@@ -355,6 +359,7 @@ module.exports = {
     const state = getOrCreateState(appId, channel);
     if (!CRISIS_CALL_ENABLED) return;
     if (!isAiHumanSession(state)) return;
+    if (!isClientEscalationEnabled(state)) return;
     const level = Number(safety?.level) || 0;
     if (level < CRISIS_TRIGGER_LEVEL) {
       if (state.graceTimer) {
